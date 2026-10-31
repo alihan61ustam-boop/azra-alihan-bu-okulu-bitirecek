@@ -306,6 +306,8 @@ export function generateFallbackTranscript(
     spokenTranscript?: string;
     summary?: string;
     title?: string;
+    isExamAlert?: boolean;
+    professorQuote?: string;
   }>,
   executiveSummary?: string,
   baseId = Date.now()
@@ -325,20 +327,51 @@ export function generateFallbackTranscript(
       const sentences = textToSplit
         .split(/(?<=[.!?])\s+/)
         .map((s) => s.trim())
-        .filter((s) => s.length > 3);
+        .filter((s) => s.length > 2);
 
       if (sentences.length === 0 && textToSplit) {
         sentences.push(textToSplit);
       }
 
       sentences.forEach((sentence, idx) => {
-        const sentenceSec = Math.max(0, baseSec + idx * 8);
+        const sentenceSec = Math.max(0, baseSec + idx * 7);
+        const lower = sentence.toLowerCase();
+        const isExam =
+          Boolean(seg.isExamAlert) ||
+          lower.includes("sınav") ||
+          lower.includes("vize") ||
+          lower.includes("final") ||
+          lower.includes("dikkat") ||
+          lower.includes("unutmayın") ||
+          lower.includes("sorarım");
+        const isFormula =
+          lower.includes("formül") ||
+          lower.includes("denklem") ||
+          lower.includes("eşittir") ||
+          lower.includes("grad") ||
+          lower.includes("rotasyonel") ||
+          lower.includes("diverjans");
+
+        const isImportant = isExam || isFormula;
+        const importanceType: TranscriptItem["importanceType"] = isExam
+          ? "exam_alert"
+          : isFormula
+          ? "formula"
+          : "casual";
+
         items.push({
           id: `tr-${baseId}-${counter++}`,
           timestamp: formatSeconds(sentenceSec),
           seconds: sentenceSec,
           text: sentence,
-          isProfessorHighlight: idx === 0 && Boolean(seg.spokenTranscript),
+          isImportant,
+          importanceType,
+          importanceNote: isExam
+            ? "Sınav Uyarısı"
+            : isFormula
+            ? "Kritik Formül"
+            : undefined,
+          isProfessorHighlight: isImportant,
         });
       });
     }
@@ -348,15 +381,24 @@ export function generateFallbackTranscript(
     const sentences = executiveSummary
       .split(/(?<=[.!?])\s+/)
       .map((s) => s.trim())
-      .filter((s) => s.length > 3);
+      .filter((s) => s.length > 2);
     sentences.forEach((sentence, idx) => {
-      const sec = idx * 12;
+      const sec = idx * 10;
+      const lower = sentence.toLowerCase();
+      const isImportant =
+        lower.includes("sınav") ||
+        lower.includes("vize") ||
+        lower.includes("formül") ||
+        lower.includes("denklem");
       items.push({
         id: `tr-${baseId}-${counter++}`,
         timestamp: formatSeconds(sec),
         seconds: sec,
         text: sentence,
-        isProfessorHighlight: idx === 0,
+        isImportant,
+        importanceType: isImportant ? "core_concept" : "casual",
+        importanceNote: isImportant ? "Önemli Kavram" : undefined,
+        isProfessorHighlight: isImportant,
       });
     });
   }
@@ -461,7 +503,18 @@ Verilen ders videosunu, ses kaydını, tahta karelerini veya ders notunu inceley
 4) examAlerts: Hocanın "bu kısım sınavda çıkabilir", "bunu sakın unutmayın", "vizede/finalde sorarım" dediği veya ses/bağlam olarak çok vurguladığı kritik noktalar (timestamp, seconds, severity: "critical" | "important", topic, professorQuote, examTip).
 5) conceptMap: Kavram haritası düğümleri (concept, formula [saf LaTeX], description, connectsTo).
 6) practiceQuestions: Bu dersten sınavda çıkabilecek 2 veya 3 adet çalışma sorusu (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
-7) transcript: Google Drive / Vids transkript paneli gibi videoda geçen cümle cümle konuşma dökümü (her eleman: { timestamp: "MM:SS", seconds: sayısal saniye, text: "Hocanın söylediği tam cümle", isProfessorHighlight: boolean }). Ders boyunca geçen konuşmaları eksiksiz cümleler halinde zaman damgalarıyla dök.
+7) transcript: Google Drive / Vids transkript paneli gibi videodaki/ses kaydındaki konuşmaların EKSİKSİZ VE BİREBİR (verbatim) konuşma dökümü.
+   - ASLA konuşmaları özetleme, atlama veya kısaltma.
+   - Hocanın selamlaması ("iyi akşamlar", "merhaba"), duraksamaları ("eee", "şey"), teknik sözleri, sınıf yoklaması ("öğrenci arkadaş da yok", "sisteme yükleniyordur") dahil GEREKLİ VE GEREKSİZ TÜM SÖZLERİNİ tek tek cümle cümle zaman damgasıyla listele.
+   - Her eleman:
+     {
+       "timestamp": "MM:SS",
+       "seconds": sayısal saniye,
+       "text": "Hocanın ağzından çıkan tam cümle (birebir sözler, tüm duraklamalar dahil)",
+       "isImportant": boolean (Eğer sınav uyarısı, kritik fizik formülü veya can alıcı kavram anlatımı ise true; sıradan, idari veya dolgu konuşması ise false),
+       "importanceType": "exam_alert" | "formula" | "core_concept" | "casual",
+       "importanceNote": "Kısa açıklama (örn. 'Vize Sınav Sorusu', 'Kritik Formül', 'Temel Tanım')"
+     }
 
 ÖNEMLİ BİÇİMLENDİRME KURALI:
 Tüm LaTeX formüllerindeki ters slash (backslash) işaretlerini JSON formatında geçerli kalması için ÇİFT TERS SLASH (örnek: \\\\nabla, \\\\vec, \\\\frac, \\\\partial) olarak yaz. Asla tek ters slash bırakma.
@@ -596,13 +649,30 @@ SADECE geçerli bir JSON nesnesi döndür.`;
       : [],
     transcript:
       Array.isArray(parsed.transcript) && parsed.transcript.length > 0
-        ? (parsed.transcript as Array<Record<string, unknown>>).map((tr, i) => ({
-            id: `tr-${nowId}-${i}`,
-            timestamp: String(tr.timestamp || formatSeconds(Number(tr.seconds ?? i * 15))),
-            seconds: Number(tr.seconds ?? i * 15),
-            text: String(tr.text || ""),
-            isProfessorHighlight: Boolean(tr.isProfessorHighlight),
-          }))
+        ? (parsed.transcript as Array<Record<string, unknown>>).map((tr, i) => {
+            const isImportant =
+              Boolean(tr.isImportant) ||
+              Boolean(tr.isProfessorHighlight) ||
+              tr.importanceType === "exam_alert" ||
+              tr.importanceType === "formula" ||
+              tr.importanceType === "core_concept";
+            return {
+              id: `tr-${nowId}-${i}`,
+              timestamp: String(
+                tr.timestamp || formatSeconds(Number(tr.seconds ?? i * 15))
+              ),
+              seconds: Number(tr.seconds ?? i * 15),
+              text: String(tr.text || ""),
+              isImportant,
+              importanceType:
+                (tr.importanceType as TranscriptItem["importanceType"]) ||
+                (isImportant ? "exam_alert" : "casual"),
+              importanceNote: tr.importanceNote
+                ? String(tr.importanceNote)
+                : undefined,
+              isProfessorHighlight: isImportant,
+            };
+          })
         : generateFallbackTranscript(
             Array.isArray(parsed.timeline)
               ? (parsed.timeline as Array<{

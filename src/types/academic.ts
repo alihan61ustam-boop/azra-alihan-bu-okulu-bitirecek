@@ -24,8 +24,11 @@ export interface TranscriptItem {
   id: string;
   timestamp: string; // e.g. "0:41"
   seconds: number;   // e.g. 41
-  text: string;      // Spoken sentence by the professor
-  isProfessorHighlight?: boolean;
+  text: string;      // Verbatim spoken words (every single sentence, filler words, casual remarks, full lecture speech)
+  isImportant?: boolean; // true if exam alert, critical formula, or key concept
+  importanceType?: "exam_alert" | "formula" | "core_concept" | "casual";
+  importanceNote?: string; // e.g. "Sınav Uyarısı", "Kritik Formül", "Temel Kavram"
+  isProfessorHighlight?: boolean; // backward compatibility
   speaker?: string;  // e.g. "Hoca"
 }
 

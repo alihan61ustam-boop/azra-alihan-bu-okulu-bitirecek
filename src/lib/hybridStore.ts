@@ -56,7 +56,11 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
       const existingIdx = lectures.findIndex((l) => l.id === seedLec.id);
       if (existingIdx === -1) {
         lectures.push(seedLec);
-      } else if (!lectures[existingIdx].transcript && seedLec.transcript) {
+      } else if (
+        seedLec.transcript &&
+        (!lectures[existingIdx].transcript ||
+          seedLec.transcript.length > (lectures[existingIdx].transcript?.length || 0))
+      ) {
         lectures[existingIdx] = {
           ...lectures[existingIdx],
           transcript: seedLec.transcript,

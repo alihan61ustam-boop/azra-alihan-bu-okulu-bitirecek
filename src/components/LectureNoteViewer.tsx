@@ -69,6 +69,7 @@ export function LectureNoteViewer({
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isTranscriptOpen, setIsTranscriptOpen] = useState<boolean>(true);
   const [transcriptSearch, setTranscriptSearch] = useState<string>("");
+  const [transcriptTab, setTranscriptTab] = useState<"all" | "important">("all");
   const [autoScrollTranscript, setAutoScrollTranscript] = useState<boolean>(true);
   const [openTranscripts, setOpenTranscripts] = useState<Record<string, boolean>>(
     {}
@@ -146,15 +147,24 @@ export function LectureNoteViewer({
     }
   }, [activeTranscriptIndex, autoScrollTranscript, transcriptSearch]);
 
+  const importantTranscriptCount = React.useMemo(() => {
+    return transcriptItems.filter((t) => t.isImportant).length;
+  }, [transcriptItems]);
+
   const filteredTranscript = React.useMemo(() => {
-    if (!transcriptSearch.trim()) return transcriptItems;
+    let list = transcriptItems;
+    if (transcriptTab === "important") {
+      list = list.filter((item) => item.isImportant);
+    }
+    if (!transcriptSearch.trim()) return list;
     const q = transcriptSearch.trim().toLowerCase();
-    return transcriptItems.filter(
+    return list.filter(
       (item) =>
         item.text.toLowerCase().includes(q) ||
-        item.timestamp.toLowerCase().includes(q)
+        item.timestamp.toLowerCase().includes(q) ||
+        (item.importanceNote && item.importanceNote.toLowerCase().includes(q))
     );
-  }, [transcriptItems, transcriptSearch]);
+  }, [transcriptItems, transcriptTab, transcriptSearch]);
 
   const handleJumpToTranscript = (item: TranscriptItem, index: number) => {
     setActiveTimestamp(item.timestamp);
@@ -568,15 +578,15 @@ export function LectureNoteViewer({
                 </div>
               </div>
 
-              {/* Search Bar (Transkript arayın) */}
-              <div className="p-2.5 border-b border-zinc-800/80 bg-zinc-950/40">
+              {/* Search Bar & Filter Tabs */}
+              <div className="p-2.5 border-b border-zinc-800/80 bg-zinc-950/40 space-y-2">
                 <div className="relative">
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
                   <input
                     type="text"
                     value={transcriptSearch}
                     onChange={(e) => setTranscriptSearch(e.target.value)}
-                    placeholder="Transkript arayın..."
+                    placeholder="Transkript arayın (tüm kelimeler)..."
                     className="w-full rounded-lg border border-zinc-800 bg-zinc-900/90 pl-8 pr-7 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-sky-500/50 focus:outline-none focus:ring-1 focus:ring-sky-500/30"
                   />
                   {transcriptSearch && (
@@ -589,8 +599,36 @@ export function LectureNoteViewer({
                     </button>
                   )}
                 </div>
+
+                {/* Filter Tabs: Tümü vs Önemli Vurgular */}
+                <div className="flex items-center gap-1 border-t border-zinc-800/60 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptTab("all")}
+                    className={`flex-1 rounded-md py-1 text-[11px] font-medium transition cursor-pointer text-center ${
+                      transcriptTab === "all"
+                        ? "bg-zinc-800 text-white font-semibold shadow-sm"
+                        : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    Tüm Sözler ({transcriptItems.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptTab("important")}
+                    className={`flex-1 rounded-md py-1 text-[11px] font-medium transition cursor-pointer text-center flex items-center justify-center gap-1 ${
+                      transcriptTab === "important"
+                        ? "bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30 shadow-sm"
+                        : "text-zinc-400 hover:text-amber-300"
+                    }`}
+                  >
+                    <Flame className="h-3 w-3 text-amber-400" />
+                    <span>Önemli Vurgular ({importantTranscriptCount})</span>
+                  </button>
+                </div>
+
                 {transcriptSearch && (
-                  <div className="mt-1 px-1 text-[10px] text-zinc-400">
+                  <div className="px-1 text-[10px] text-zinc-400">
                     {filteredTranscript.length} eşleşme bulundu
                   </div>
                 )}
@@ -603,7 +641,7 @@ export function LectureNoteViewer({
               >
                 {filteredTranscript.length === 0 ? (
                   <div className="py-12 text-center text-zinc-500 text-xs">
-                    Aranan ifadeye uygun cümle bulunamadı.
+                    Aranan kritere uygun konuşma bulunamadı.
                   </div>
                 ) : (
                   filteredTranscript.map((item, index) => {
@@ -615,16 +653,24 @@ export function LectureNoteViewer({
                         onClick={() => handleJumpToTranscript(item, index)}
                         className={`group flex items-start gap-2.5 rounded-lg p-2 transition cursor-pointer ${
                           isActive
-                            ? "bg-sky-950/40 border border-sky-500/40 text-white shadow-[0_0_15px_rgba(56,189,248,0.15)]"
-                            : "hover:bg-zinc-900/80 text-zinc-300"
+                            ? item.isImportant
+                              ? "bg-amber-950/40 border border-amber-500/50 text-white shadow-[0_0_15px_rgba(251,191,36,0.2)]"
+                              : "bg-sky-950/40 border border-sky-500/40 text-white shadow-[0_0_15px_rgba(56,189,248,0.15)]"
+                            : item.isImportant
+                            ? "bg-zinc-900/40 border-l-2 border-amber-500/60 hover:bg-zinc-900/80 text-zinc-200"
+                            : "hover:bg-zinc-900/70 text-zinc-300"
                         }`}
                       >
-                        {/* Blue Timestamp Button */}
+                        {/* Timestamp Button */}
                         <button
                           type="button"
                           className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold transition cursor-pointer ${
                             isActive
-                              ? "bg-sky-500 text-zinc-950 font-bold"
+                              ? item.isImportant
+                                ? "bg-amber-400 text-zinc-950 font-bold"
+                                : "bg-sky-500 text-zinc-950 font-bold"
+                              : item.isImportant
+                              ? "bg-amber-500/20 text-amber-300 border border-amber-500/35 hover:bg-amber-500/30"
                               : "bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 border border-sky-500/30"
                           }`}
                         >
@@ -634,21 +680,51 @@ export function LectureNoteViewer({
                         <div className="min-w-0 flex-1">
                           <p
                             className={`text-xs leading-relaxed ${
-                              isActive ? "text-sky-100 font-medium" : "text-zinc-300"
+                              isActive
+                                ? item.isImportant
+                                  ? "text-amber-100 font-semibold"
+                                  : "text-sky-100 font-medium"
+                                : item.isImportant
+                                ? "text-zinc-100 font-medium"
+                                : "text-zinc-300"
                             }`}
                           >
                             {item.text}
                           </p>
-                          {item.isProfessorHighlight && (
-                            <span className="mt-1 inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-300 border border-amber-500/20">
-                              <Sparkles className="h-2.5 w-2.5" />
-                              Hoca Vurgusu
+
+                          {/* Extra Highlighting for Important Sentences */}
+                          {item.isImportant ? (
+                            <div className="mt-1 flex flex-wrap items-center gap-1">
+                              {item.importanceType === "exam_alert" ? (
+                                <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold text-amber-300 border border-amber-500/30">
+                                  <Flame className="h-2.5 w-2.5 text-amber-400" />
+                                  {item.importanceNote || "Sınav Uyarısı"}
+                                </span>
+                              ) : item.importanceType === "formula" ? (
+                                <span className="inline-flex items-center gap-1 rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300 border border-violet-500/30">
+                                  <Sigma className="h-2.5 w-2.5 text-violet-400" />
+                                  {item.importanceNote || "Kritik Formül"}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300 border border-emerald-500/30">
+                                  <Sparkles className="h-2.5 w-2.5 text-emerald-400" />
+                                  {item.importanceNote || "Temel Kavram"}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[9px] text-zinc-600 block mt-0.5">
+                              Genel konuşma
                             </span>
                           )}
                         </div>
 
                         {isActive && (
-                          <span className="shrink-0 text-sky-400 animate-pulse mt-0.5">
+                          <span
+                            className={`shrink-0 animate-pulse mt-0.5 ${
+                              item.isImportant ? "text-amber-400" : "text-sky-400"
+                            }`}
+                          >
                             <Volume2 className="h-3.5 w-3.5" />
                           </span>
                         )}
@@ -1031,7 +1107,11 @@ export function LectureNoteViewer({
                   onClick={() => handleJumpToTranscript(item, idx)}
                   className={`flex items-start gap-3 rounded-xl border p-3 transition cursor-pointer ${
                     isActive
-                      ? "border-sky-500/50 bg-sky-950/30 text-white"
+                      ? item.isImportant
+                        ? "border-amber-500/60 bg-amber-950/30 text-white shadow-[0_0_15px_rgba(251,191,36,0.2)]"
+                        : "border-sky-500/50 bg-sky-950/30 text-white shadow-[0_0_15px_rgba(56,189,248,0.15)]"
+                      : item.isImportant
+                      ? "border-amber-500/30 bg-amber-500/[0.04] hover:bg-zinc-900/80 text-zinc-200"
                       : "border-zinc-800/80 bg-[#050507] hover:border-zinc-700 hover:bg-zinc-900/60 text-zinc-300"
                   }`}
                 >
@@ -1039,23 +1119,47 @@ export function LectureNoteViewer({
                     type="button"
                     className={`shrink-0 rounded px-2 py-0.5 font-mono text-xs font-semibold cursor-pointer ${
                       isActive
-                        ? "bg-sky-500 text-zinc-950"
+                        ? item.isImportant
+                          ? "bg-amber-400 text-zinc-950 font-bold"
+                          : "bg-sky-500 text-zinc-950 font-bold"
+                        : item.isImportant
+                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
                         : "bg-sky-500/15 text-sky-400 border border-sky-500/30"
                     }`}
                   >
                     {item.timestamp}
                   </button>
                   <div className="flex-1 space-y-1">
-                    <p className="text-xs sm:text-sm leading-relaxed">{item.text}</p>
-                    {item.isProfessorHighlight && (
-                      <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 border border-amber-500/20">
-                        <Sparkles className="h-3 w-3" />
-                        Hoca Vurgulu Cümle
+                    <p className={`text-xs sm:text-sm leading-relaxed ${item.isImportant ? "font-medium text-zinc-100" : "text-zinc-300"}`}>
+                      {item.text}
+                    </p>
+                    {item.isImportant ? (
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {item.importanceType === "exam_alert" ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/30">
+                            <Flame className="h-3 w-3 text-amber-400" />
+                            {item.importanceNote || "Sınav Uyarısı"}
+                          </span>
+                        ) : item.importanceType === "formula" ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-violet-500/15 px-2 py-0.5 text-[10px] font-bold text-violet-300 border border-violet-500/30">
+                            <Sigma className="h-3 w-3 text-violet-400" />
+                            {item.importanceNote || "Kritik Formül"}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/30">
+                            <Sparkles className="h-3 w-3 text-emerald-400" />
+                            {item.importanceNote || "Temel Kavram"}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-zinc-600 block">
+                        Genel konuşma / ders akışı
                       </span>
                     )}
                   </div>
                   {isActive && (
-                    <span className="shrink-0 text-sky-400 flex items-center gap-1 text-[11px] font-mono">
+                    <span className={`shrink-0 flex items-center gap-1 text-[11px] font-mono ${item.isImportant ? "text-amber-400" : "text-sky-400"}`}>
                       <Volume2 className="h-4 w-4 animate-pulse" />
                       <span>Oynatılıyor</span>
                     </span>
