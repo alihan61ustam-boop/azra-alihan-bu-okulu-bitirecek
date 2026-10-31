@@ -21,16 +21,21 @@ import {
   Download,
   ArrowRight,
   Video,
+  Search,
+  X,
+  Volume2,
 } from "lucide-react";
-import { Course, Lecture } from "@/types/academic";
+import { Course, Lecture, TranscriptItem } from "@/types/academic";
 import { LatexFormula, MathMarkdown } from "@/components/MathMarkdown";
 import { loadMediaObjectUrl, saveMediaBlob } from "@/lib/mediaDb";
+import { generateFallbackTranscript } from "@/lib/gemini/client";
 
 type NoteFilter =
   | "all"
   | "alerts"
   | "whiteboard"
   | "timeline"
+  | "transcript"
   | "practice";
 
 export function LectureNoteViewer({
@@ -60,6 +65,11 @@ export function LectureNoteViewer({
   const [activeTimestamp, setActiveTimestamp] = useState<string | null>(null);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [isTranscriptOpen, setIsTranscriptOpen] = useState<boolean>(true);
+  const [transcriptSearch, setTranscriptSearch] = useState<string>("");
+  const [autoScrollTranscript, setAutoScrollTranscript] = useState<boolean>(true);
   const [openTranscripts, setOpenTranscripts] = useState<Record<string, boolean>>(
     {}
   );
@@ -70,6 +80,7 @@ export function LectureNoteViewer({
   const audioRef = useRef<HTMLAudioElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const directVideoInputRef = useRef<HTMLInputElement>(null);
+  const transcriptContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let revokedUrl: string | null = null;
@@ -97,8 +108,70 @@ export function LectureNoteViewer({
     };
   }, [activeLecture]);
 
+  const transcriptItems: TranscriptItem[] = React.useMemo(() => {
+    if (!activeLecture) return [];
+    if (activeLecture.transcript && activeLecture.transcript.length > 0) {
+      return activeLecture.transcript;
+    }
+    return generateFallbackTranscript(
+      activeLecture.timeline,
+      activeLecture.executiveSummary,
+      2000
+    );
+  }, [activeLecture]);
+
+  const activeTranscriptIndex = React.useMemo(() => {
+    if (!transcriptItems || transcriptItems.length === 0) return -1;
+    let idx = -1;
+    for (let i = 0; i < transcriptItems.length; i++) {
+      if (currentTime >= transcriptItems[i].seconds) {
+        idx = i;
+      } else {
+        break;
+      }
+    }
+    return idx;
+  }, [transcriptItems, currentTime]);
+
+  useEffect(() => {
+    if (!autoScrollTranscript || activeTranscriptIndex < 0 || transcriptSearch) return;
+    const targetElement = document.getElementById(
+      `transcript-row-${activeTranscriptIndex}`
+    );
+    if (targetElement && transcriptContainerRef.current) {
+      targetElement.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    }
+  }, [activeTranscriptIndex, autoScrollTranscript, transcriptSearch]);
+
+  const filteredTranscript = React.useMemo(() => {
+    if (!transcriptSearch.trim()) return transcriptItems;
+    const q = transcriptSearch.trim().toLowerCase();
+    return transcriptItems.filter(
+      (item) =>
+        item.text.toLowerCase().includes(q) ||
+        item.timestamp.toLowerCase().includes(q)
+    );
+  }, [transcriptItems, transcriptSearch]);
+
+  const handleJumpToTranscript = (item: TranscriptItem, index: number) => {
+    setActiveTimestamp(item.timestamp);
+    setCurrentTime(item.seconds);
+
+    if (videoRef.current) {
+      videoRef.current.currentTime = item.seconds;
+      videoRef.current.play().catch(() => {});
+    } else if (audioRef.current) {
+      audioRef.current.currentTime = item.seconds;
+      audioRef.current.play().catch(() => {});
+    }
+  };
+
   const handleJumpToTimestamp = (timestamp: string, seconds: number) => {
     setActiveTimestamp(timestamp);
+    setCurrentTime(seconds);
     playerContainerRef.current?.scrollIntoView({
       behavior: "smooth",
       block: "nearest",
@@ -251,182 +324,342 @@ export function LectureNoteViewer({
         }}
       />
 
-      {/* Media Player OR Interactive Timestamp Bar */}
+      {/* Media Player & Synchronized Transcript Panel (Google Drive / Vids Style) */}
       <div
         ref={playerContainerRef}
-        className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#050507]"
+        className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#050507] shadow-2xl"
       >
-        {mediaObjectUrl ? (
-          <div className="p-3 sm:p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-2.5">
-              <div className="flex items-center gap-2">
-                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/20 text-amber-400">
-                  <Play className="h-3 w-3 fill-amber-400" />
-                </span>
-                <span className="text-xs font-bold text-white">
-                  Ders Kaydı Oynatıcı
-                </span>
-                {activeTimestamp && (
-                  <span className="rounded bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] text-amber-300">
-                    Aktif: {activeTimestamp}
+        {/* Top Header Bar across the player */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-zinc-800/80 px-3.5 py-2.5 bg-zinc-950/70">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/20">
+              <Video className="h-3.5 w-3.5" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-zinc-100 truncate flex items-center gap-2">
+                <span>{activeLecture.title}</span>
+                {mediaObjectUrl && (
+                  <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400 border border-emerald-500/20">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Medya Hazır
                   </span>
                 )}
               </div>
+              <div className="text-[11px] text-zinc-500 font-mono">
+                {activeLecture.recordedDate} • Süre: {activeLecture.durationLabel}
+                {activeTimestamp && (
+                  <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-300">
+                    Aktif Konum: {activeTimestamp}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
 
-              <div className="flex items-center gap-2">
-                <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-                  {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
+          <div className="flex items-center gap-2">
+            {/* Speed selection */}
+            <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+              {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                <button
+                  key={rate}
+                  type="button"
+                  onClick={() => {
+                    setPlaybackRate(rate);
+                    if (videoRef.current) videoRef.current.playbackRate = rate;
+                    if (audioRef.current) audioRef.current.playbackRate = rate;
+                  }}
+                  className={`px-1.5 py-0.5 font-mono text-[10px] font-semibold rounded transition cursor-pointer ${
+                    playbackRate === rate
+                      ? "bg-amber-400 text-zinc-950"
+                      : "text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  {rate}x
+                </button>
+              ))}
+            </div>
+
+            {/* Toggle Transcript Panel Button */}
+            <button
+              type="button"
+              onClick={() => setIsTranscriptOpen((prev) => !prev)}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition cursor-pointer ${
+                isTranscriptOpen
+                  ? "border-sky-500/40 bg-sky-500/15 text-sky-300"
+                  : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white"
+              }`}
+            >
+              <FileText className="h-3.5 w-3.5" />
+              <span>Transkript</span>
+              <span className="rounded bg-sky-500/20 px-1 py-0.2 font-mono text-[10px] text-sky-200">
+                {transcriptItems.length}
+              </span>
+            </button>
+
+            {/* Attach or change video */}
+            <button
+              type="button"
+              onClick={() => directVideoInputRef.current?.click()}
+              className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300 hover:text-white cursor-pointer transition hover:bg-zinc-800"
+            >
+              {mediaObjectUrl ? "Farklı Video Seç" : "Video Bağla"}
+            </button>
+          </div>
+        </div>
+
+        {/* Player and Transcript Side-by-Side Area */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 min-h-[360px] divide-y lg:divide-y-0 lg:divide-x divide-zinc-800/80">
+          {/* Main Player Column (Left) */}
+          <div
+            className={`${
+              isTranscriptOpen ? "lg:col-span-7 xl:col-span-8" : "lg:col-span-12"
+            } p-3 sm:p-4 flex flex-col justify-between space-y-3 bg-[#020204]`}
+          >
+            {mediaObjectUrl ? (
+              activeLecture.sourceType === "audio" ||
+              activeLecture.mediaMimeType?.startsWith("audio") ? (
+                <div className="flex flex-col items-center justify-center py-10 px-4 rounded-xl border border-zinc-800/80 bg-zinc-950/60 space-y-4">
+                  <div className="h-16 w-16 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 animate-pulse">
+                    <Volume2 className="h-8 w-8" />
+                  </div>
+                  <div className="text-center">
+                    <div className="text-sm font-semibold text-zinc-200">
+                      {activeLecture.title}
+                    </div>
+                    <div className="text-xs text-zinc-500">Ses Kaydı Oynatılıyor</div>
+                  </div>
+                  <audio
+                    ref={audioRef}
+                    controls
+                    src={mediaObjectUrl}
+                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    className="w-full max-w-md"
+                  />
+                </div>
+              ) : (
+                <div className="relative rounded-xl overflow-hidden bg-black border border-zinc-800/80 flex items-center justify-center shadow-inner">
+                  <video
+                    ref={videoRef}
+                    controls
+                    src={mediaObjectUrl}
+                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    className="max-h-[460px] w-full object-contain"
+                  />
+                </div>
+              )
+            ) : (
+              /* Visual Stage when video is not attached yet */
+              <div className="relative rounded-xl border border-zinc-800/80 bg-gradient-to-b from-zinc-950/80 to-zinc-900/40 p-6 flex flex-col justify-between min-h-[300px]">
+                <div className="space-y-2">
+                  <div className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-400 border border-amber-500/20">
+                    <Sparkles className="h-3 w-3" />
+                    <span>Akademik Ders Alanı</span>
+                  </div>
+                  <h3 className="text-base font-semibold text-zinc-100">
+                    {activeLecture.title}
+                  </h3>
+                  <p className="text-xs text-zinc-400 line-clamp-2">
+                    {activeLecture.executiveSummary}
+                  </p>
+                </div>
+
+                <div
+                  onClick={() => directVideoInputRef.current?.click()}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={async (e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files?.[0];
+                    if (!file || !activeLecture) return;
+                    const key = `blob-${activeLecture.id}`;
+                    await saveMediaBlob(key, file);
+                    const objUrl = URL.createObjectURL(file);
+                    setMediaObjectUrl(objUrl);
+                    onAttachMedia?.(activeLecture.id, file);
+                  }}
+                  className="my-4 rounded-xl border border-dashed border-zinc-800 bg-zinc-900/40 p-4 text-center hover:border-amber-500/50 hover:bg-zinc-900/70 transition cursor-pointer group"
+                >
+                  <Video className="mx-auto h-7 w-7 text-zinc-500 group-hover:text-amber-400 transition" />
+                  <div className="mt-2 text-xs font-semibold text-zinc-200">
+                    Kendi ders videonu yükle veya sürükle (.mp4, .mkv, .webm)
+                  </div>
+                  <div className="text-[11px] text-zinc-500 mt-0.5">
+                    Sağdaki transkripte tıkladığında video anında o saniyeye atlar.
+                  </div>
+                </div>
+
+                <div className="text-[11px] text-zinc-500 flex items-center justify-between">
+                  <span>Kayıt Tarihi: {activeLecture.recordedDate}</span>
+                  <span className="font-mono text-zinc-400">
+                    Tahmini Süre: {activeLecture.durationLabel}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Timeline Chips under player */}
+            <div className="pt-2 border-t border-zinc-800/70">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] text-zinc-400 font-medium">
+                  Hızlı Bölüm Atlama:
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {activeLecture.timeline.map((seg) => (
                     <button
-                      key={rate}
+                      key={seg.id}
                       type="button"
-                      onClick={() => {
-                        setPlaybackRate(rate);
-                        if (videoRef.current) videoRef.current.playbackRate = rate;
-                        if (audioRef.current) audioRef.current.playbackRate = rate;
-                      }}
-                      className={`px-1.5 py-0.5 font-mono text-[10px] font-semibold rounded transition cursor-pointer ${
-                        playbackRate === rate
-                          ? "bg-amber-400 text-zinc-950"
-                          : "text-zinc-400 hover:text-white"
+                      onClick={() => handleJumpToTimestamp(seg.timestamp, seg.seconds)}
+                      className={`rounded-md border px-2 py-0.5 font-mono text-[11px] transition cursor-pointer ${
+                        activeTimestamp === seg.timestamp
+                          ? "border-amber-400 bg-amber-500/20 text-amber-200 shadow-sm"
+                          : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
                       }`}
                     >
-                      {rate}x
+                      {seg.timestamp}
                     </button>
                   ))}
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => directVideoInputRef.current?.click()}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300 hover:text-white cursor-pointer"
-                >
-                  Farklı Video Seç
-                </button>
-              </div>
-            </div>
-
-            {activeLecture.sourceType === "audio" ||
-            activeLecture.mediaMimeType?.startsWith("audio") ? (
-              <audio
-                ref={audioRef}
-                controls
-                src={mediaObjectUrl}
-                className="w-full"
-              />
-            ) : (
-              <video
-                ref={videoRef}
-                controls
-                src={mediaObjectUrl}
-                className="max-h-96 w-full rounded-xl bg-black object-contain border border-zinc-800/80"
-              />
-            )}
-
-            {/* Quick Timestamp Jump Bar under active video */}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-zinc-800/70">
-              <span className="text-[11px] text-zinc-400">
-                Zaman damgasına tıkla, doğrudan videoda o noktaya atla:
-              </span>
-              <div className="flex flex-wrap items-center gap-1.5">
-                {activeLecture.timeline.map((seg) => (
-                  <button
-                    key={seg.id}
-                    type="button"
-                    onClick={() => handleJumpToTimestamp(seg.timestamp, seg.seconds)}
-                    className={`rounded-md border px-2 py-0.5 font-mono text-[11px] transition cursor-pointer ${
-                      activeTimestamp === seg.timestamp
-                        ? "border-amber-400 bg-amber-500/20 text-amber-200"
-                        : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                    }`}
-                  >
-                    {seg.timestamp}
-                  </button>
-                ))}
               </div>
             </div>
           </div>
-        ) : (
-          <div className="p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-amber-400">
-                  <Play className="h-3.5 w-3.5" />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold text-zinc-200">
-                    {activeLecture.title}
-                  </div>
-                  <div className="text-[11px] text-zinc-500">
-                    {activeLecture.recordedDate} • Süre:{" "}
-                    <span className="font-mono text-zinc-300">
-                      {activeLecture.durationLabel}
-                    </span>{" "}
-                    {activeTimestamp && (
-                      <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-amber-300">
-                        Seçili: {activeTimestamp}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
 
-              <div className="flex flex-wrap items-center gap-1.5">
-                {activeLecture.timeline.map((seg) => (
+          {/* Dedicated Synchronized Transcript Column (Right) */}
+          {isTranscriptOpen && (
+            <div className="lg:col-span-5 xl:col-span-4 flex flex-col bg-[#08080b]">
+              {/* Transcript Header (Matching Google Drive / Vids screenshot) */}
+              <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-800/80 bg-zinc-950/90">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-zinc-100">Transkript</span>
+                  <span className="inline-flex items-center gap-1 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-400 border border-sky-500/20">
+                    <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse" />
+                    Canlı Takip
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
                   <button
-                    key={seg.id}
                     type="button"
-                    onClick={() => handleJumpToTimestamp(seg.timestamp, seg.seconds)}
-                    className={`rounded-md border px-2 py-1 font-mono text-[11px] transition cursor-pointer ${
-                      activeTimestamp === seg.timestamp
-                        ? "border-amber-400 bg-amber-500/20 text-amber-200"
-                        : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    title={
+                      autoScrollTranscript
+                        ? "Otomatik kaydırmayı durdur"
+                        : "Otomatik kaydırmayı aç"
+                    }
+                    onClick={() => setAutoScrollTranscript((prev) => !prev)}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition cursor-pointer border ${
+                      autoScrollTranscript
+                        ? "border-sky-500/30 bg-sky-500/15 text-sky-300"
+                        : "border-zinc-800 bg-zinc-900 text-zinc-500"
                     }`}
                   >
-                    {seg.timestamp}
+                    Oto-Kaydır: {autoScrollTranscript ? "Açık" : "Kapalı"}
                   </button>
-                ))}
-              </div>
-            </div>
 
-            {/* Direct Video File Attach Card */}
-            <div
-              onClick={() => directVideoInputRef.current?.click()}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={async (e) => {
-                e.preventDefault();
-                const file = e.dataTransfer.files?.[0];
-                if (!file || !activeLecture) return;
-                const key = `blob-${activeLecture.id}`;
-                await saveMediaBlob(key, file);
-                const objUrl = URL.createObjectURL(file);
-                setMediaObjectUrl(objUrl);
-                onAttachMedia?.(activeLecture.id, file);
-              }}
-              className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-3.5 hover:border-amber-500/40 hover:bg-zinc-900/60 transition cursor-pointer"
-            >
-              <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-400">
-                  <Video className="h-4 w-4" />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold text-zinc-200">
-                    Bu derse ait video veya ses kaydın var mı?
-                  </div>
-                  <div className="text-[11px] text-zinc-400">
-                    Dosyayı buraya sürükle veya seç (.MP4, .MKV, .WEBM, .MOV, .MP3) — anında zaman damgalarıyla izle.
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsTranscriptOpen(false)}
+                    className="rounded p-1 text-zinc-400 hover:text-white hover:bg-zinc-800 transition cursor-pointer"
+                    title="Paneli Kapat"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
 
-              <button
-                type="button"
-                className="shrink-0 rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 hover:bg-zinc-200"
+              {/* Search Bar (Transkript arayın) */}
+              <div className="p-2.5 border-b border-zinc-800/80 bg-zinc-950/40">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
+                  <input
+                    type="text"
+                    value={transcriptSearch}
+                    onChange={(e) => setTranscriptSearch(e.target.value)}
+                    placeholder="Transkript arayın..."
+                    className="w-full rounded-lg border border-zinc-800 bg-zinc-900/90 pl-8 pr-7 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-sky-500/50 focus:outline-none focus:ring-1 focus:ring-sky-500/30"
+                  />
+                  {transcriptSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setTranscriptSearch("")}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white cursor-pointer"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+                {transcriptSearch && (
+                  <div className="mt-1 px-1 text-[10px] text-zinc-400">
+                    {filteredTranscript.length} eşleşme bulundu
+                  </div>
+                )}
+              </div>
+
+              {/* Scrollable Sentence List */}
+              <div
+                ref={transcriptContainerRef}
+                className="flex-1 overflow-y-auto max-h-[440px] p-2 space-y-1 text-xs divide-y divide-zinc-900"
               >
-                Video Yükle
-              </button>
+                {filteredTranscript.length === 0 ? (
+                  <div className="py-12 text-center text-zinc-500 text-xs">
+                    Aranan ifadeye uygun cümle bulunamadı.
+                  </div>
+                ) : (
+                  filteredTranscript.map((item, index) => {
+                    const isActive = activeTranscriptIndex === index;
+                    return (
+                      <div
+                        key={item.id}
+                        id={`transcript-row-${index}`}
+                        onClick={() => handleJumpToTranscript(item, index)}
+                        className={`group flex items-start gap-2.5 rounded-lg p-2 transition cursor-pointer ${
+                          isActive
+                            ? "bg-sky-950/40 border border-sky-500/40 text-white shadow-[0_0_15px_rgba(56,189,248,0.15)]"
+                            : "hover:bg-zinc-900/80 text-zinc-300"
+                        }`}
+                      >
+                        {/* Blue Timestamp Button */}
+                        <button
+                          type="button"
+                          className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold transition cursor-pointer ${
+                            isActive
+                              ? "bg-sky-500 text-zinc-950 font-bold"
+                              : "bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 border border-sky-500/30"
+                          }`}
+                        >
+                          {item.timestamp}
+                        </button>
+
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className={`text-xs leading-relaxed ${
+                              isActive ? "text-sky-100 font-medium" : "text-zinc-300"
+                            }`}
+                          >
+                            {item.text}
+                          </p>
+                          {item.isProfessorHighlight && (
+                            <span className="mt-1 inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-300 border border-amber-500/20">
+                              <Sparkles className="h-2.5 w-2.5" />
+                              Hoca Vurgusu
+                            </span>
+                          )}
+                        </div>
+
+                        {isActive && (
+                          <span className="shrink-0 text-sky-400 animate-pulse mt-0.5">
+                            <Volume2 className="h-3.5 w-3.5" />
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Section Filter Pills */}
@@ -445,6 +678,10 @@ export function LectureNoteViewer({
             {
               id: "timeline",
               label: `Dakika Dakika (${activeLecture.timeline.length})`,
+            },
+            {
+              id: "transcript",
+              label: `Transkript (${transcriptItems.length})`,
             },
             {
               id: "practice",
@@ -745,7 +982,92 @@ export function LectureNoteViewer({
           </section>
         )}
 
-      {/* 5. CONCEPT MAP & PRACTICE QUESTIONS */}
+      {/* 5. DEDICATED FULL TRANSCRIPT SECTION */}
+      {filter === "transcript" && (
+        <section className="rounded-2xl border border-zinc-800/90 bg-zinc-900/30 p-4 sm:p-5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
+            <div className="flex items-center gap-2">
+              <FileText className="h-4 w-4 text-sky-400" />
+              <h3 className="text-sm font-bold text-white">
+                Tam Ders Transkripti &amp; Konuşma Metni
+              </h3>
+              <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 font-mono text-[10px] font-semibold text-sky-300">
+                {transcriptItems.length} Cümle
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                const fullText = transcriptItems
+                  .map((t) => `[${t.timestamp}] ${t.text}`)
+                  .join("\n\n");
+                navigator.clipboard?.writeText(fullText);
+                setCopiedId("transcript-all");
+                setTimeout(() => setCopiedId(null), 1800);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-300 hover:text-white cursor-pointer"
+            >
+              {copiedId === "transcript-all" ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Kopyalandı</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3.5 w-3.5" />
+                  <span>Tüm Transkripti Kopyala</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="grid gap-2 max-h-[600px] overflow-y-auto pr-2 divide-y divide-zinc-900">
+            {transcriptItems.map((item, idx) => {
+              const isActive = activeTranscriptIndex === idx;
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleJumpToTranscript(item, idx)}
+                  className={`flex items-start gap-3 rounded-xl border p-3 transition cursor-pointer ${
+                    isActive
+                      ? "border-sky-500/50 bg-sky-950/30 text-white"
+                      : "border-zinc-800/80 bg-[#050507] hover:border-zinc-700 hover:bg-zinc-900/60 text-zinc-300"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    className={`shrink-0 rounded px-2 py-0.5 font-mono text-xs font-semibold cursor-pointer ${
+                      isActive
+                        ? "bg-sky-500 text-zinc-950"
+                        : "bg-sky-500/15 text-sky-400 border border-sky-500/30"
+                    }`}
+                  >
+                    {item.timestamp}
+                  </button>
+                  <div className="flex-1 space-y-1">
+                    <p className="text-xs sm:text-sm leading-relaxed">{item.text}</p>
+                    {item.isProfessorHighlight && (
+                      <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300 border border-amber-500/20">
+                        <Sparkles className="h-3 w-3" />
+                        Hoca Vurgulu Cümle
+                      </span>
+                    )}
+                  </div>
+                  {isActive && (
+                    <span className="shrink-0 text-sky-400 flex items-center gap-1 text-[11px] font-mono">
+                      <Volume2 className="h-4 w-4 animate-pulse" />
+                      <span>Oynatılıyor</span>
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* 6. CONCEPT MAP & PRACTICE QUESTIONS */}
       {(filter === "all" || filter === "practice") && (
         <section className="space-y-5">
           {activeLecture.conceptMap.length > 0 && (

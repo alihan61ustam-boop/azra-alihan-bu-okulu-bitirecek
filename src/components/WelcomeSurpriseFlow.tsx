@@ -45,7 +45,8 @@ const TUTORIAL_SLIDES: TutorialSlide[] = [
     description:
       "Online ders kayıtlarını (MP4, WebM, MP3, WAV) yüklediğinde Gemini videoyu hem izler hem dinler; tahtadaki denklemleri LaTeX formatına çevirir ve tıklanabilir zaman damgaları oluşturur.",
     highlights: [
-      "Tıklanabilir [11:45] zaman damgalarıyla videoda tam o saniyeye atlama",
+      "Tıklanabilir [0:41] zaman damgalarıyla videoda tam o saniyeye atlama",
+      "Canlı senkronize transkript paneliyle hocanın söylediği her cümleyi anlık takip etme ve arama",
       "Tahtadaki tüm fizik formüllerinin KaTeX ile kitap kalitesinde gösterimi",
       "Hocanın 'Bu kısım sınavda çıkabilir / sakın unutmayın' dediği anlar için özel Sınav Uyarısı rozetleri",
     ],

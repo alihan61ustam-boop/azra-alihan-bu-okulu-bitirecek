@@ -244,7 +244,278 @@ export const INITIAL_LECTURES: Lecture[] = [
           "**Çözüm:**\nSilindirik koordinatlarda hız karesi $v^2 = \\dot{r}^2 + r^2\\dot{\\phi}^2 + \\dot{z}^2$ ve bağ koşulu $z = r\\cot\\alpha \\implies \\dot{z} = \\dot{r}\\cot\\alpha$ olduğundan:\n$$T = \\frac{1}{2}m\\left(\\dot{r}^2(1 + \\cot^2\\alpha) + r^2\\dot{\\phi}^2\\right) = \\frac{1}{2}m\\left(\\frac{\\dot{r}^2}{\\sin^2\\alpha} + r^2\\dot{\\phi}^2\\right)$$\n$$V = mgz = mgr\\cot\\alpha$$\n\nLagrangian:\n$$L = \\frac{1}{2}m\\frac{\\dot{r}^2}{\\sin^2\\alpha} + \\frac{1}{2}mr^2\\dot{\\phi}^2 - mgr\\cot\\alpha$$\n\n$\\phi$ döngüsel olduğundan $p_\\phi = mr^2\\dot{\\phi} = \\ell = \\text{sabit}$ ve radyal denklem:\n$$\\frac{m}{\\sin^2\\alpha}\\ddot{r} - \\frac{\\ell^2}{mr^3} + mg\\cot\\alpha = 0$$",
       },
     ],
+    transcript: [
+      {
+        id: "tr-km-1",
+        timestamp: "00:00",
+        seconds: 0,
+        text: "Arkadaşlar hoş geldiniz. Şimdiye kadar F = ma ile her kuvveti vektörel olarak bileşenlerine ayırdık.",
+      },
+      {
+        id: "tr-km-2",
+        timestamp: "00:45",
+        seconds: 45,
+        text: "Ama küresel yüzeyde kayan bir boncuk düşündüğünüzde tepki kuvvetini önceden bilemiyoruz.",
+      },
+      {
+        id: "tr-km-3",
+        timestamp: "02:10",
+        seconds: 130,
+        text: "İşte bugün skaler enerjiler üzerinden çalışan Lagrange mekaniğine geçiyoruz.",
+      },
+      {
+        id: "tr-km-4",
+        timestamp: "11:45",
+        seconds: 705,
+        text: "Dikkat edin, toplam mekanik enerji T artı V'dir ama Lagrangian L eşittir T eksi V olarak tanımlanır!",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-km-5",
+        timestamp: "12:30",
+        seconds: 750,
+        text: "Sakın işaret hatası yapmayın; sınav kağıtlarında en çok T + V yazıldığı için puan kırıyorum.",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-km-6",
+        timestamp: "24:05",
+        seconds: 1445,
+        text: "Burada Euler-Lagrange hareket denklemini ve kanonik momentum tanımını çıkarıyoruz.",
+      },
+    ],
     createdAt: "2026-10-28T14:00:00Z",
+  },
+  {
+    id: "lec-emt-03",
+    courseId: "course-elektromanyetizma",
+    title: "3 DERSELEKTROMAGNETİK TEORİ.mp4 — Elektrostatik Potansiyel, Poisson ve Laplace Denklemleri",
+    recordedDate: "2 Kasım 2026",
+    sourceType: "video",
+    durationLabel: "46:15",
+    executiveSummary:
+      "Elektrostatik alanın korunumlu yapısı ($\\nabla \\times \\mathbf{E} = 0$) incelenerek skaler potansiyel $\\mathbf{E} = -\\nabla V$ bağıntısı çıkarılmıştır. Gauss yasası diferansiyel formuyla birleştirilerek elektrostatik sınır değer problemlerinin temelini oluşturan Poisson denklemi ($\\nabla^2 V = -\\rho/\\varepsilon_0$) ve serbest yükün olmadığı bölgeler için Laplace denklemi ($\\nabla^2 V = 0$) formüle edilmiştir.",
+    timeline: [
+      {
+        id: "seg-emt3-1",
+        timestamp: "00:41",
+        seconds: 41,
+        title: "Ders Girişi, İdari Bilgiler ve Çevrimiçi Kayıt Duyuruları",
+        summary:
+          "Hoca canlı derse katılım olmasa da kayıtların sisteme yükleneceğini belirterek önceki dönemlerin ders videolarını da izlemeyi tavsiye etti.",
+        spokenTranscript:
+          "Evet arkadaşlar iyi akşamlar diliyorum. Bugünkü dersimize başlamak istiyorum. Bugün siteme daha önceki dönemlerde online olarak değil de sınıf ortamında anlattığım derslerin videolarını da size yükledim, bunları lütfen izleyin.",
+        equations: [],
+        isExamAlert: false,
+      },
+      {
+        id: "seg-emt3-2",
+        timestamp: "02:05",
+        seconds: 125,
+        title: "Elektrostatik Potansiyel ve Gradyen Bağıntısı (E = -∇V)",
+        summary:
+          "Elektrostatik alan korunumlu olduğundan rotasyoneli sıfırdır. Bu sayede vektörel alan skaler potansiyelin negatif gradyeni olarak tanımlanmıştır.",
+        spokenTranscript:
+          "Bildiğiniz gibi elektrostatik alan korunumlu bir alandır, yani rotasyoneli sıfırdır. Rotasyoneli sıfır olan her vektör bir skaler fonksiyonun gradyeni olarak ifade edilebilir: E eşittir eksi grad V.",
+        equations: [
+          "\\nabla \\times \\mathbf{E} = 0 \\implies \\mathbf{E} = -\\nabla V",
+          "V(\\mathbf{r}) = -\\int_{\\mathcal{O}}^{\\mathbf{r}} \\mathbf{E} \\cdot d\\mathbf{l}",
+        ],
+        isExamAlert: true,
+        professorQuote:
+          "E eşittir eksi grad V tanımındaki eksi işaretinin fiziksel anlamını soracağım: Elektrik alan her zaman azalan potansiyel yönündedir!",
+      },
+      {
+        id: "seg-emt3-3",
+        timestamp: "04:05",
+        seconds: 245,
+        title: "Poisson ve Laplace Diferansiyel Denklemleri",
+        summary:
+          "Gauss yasası (div E = rho / epsilon_0) içerisine E = -grad V yazılarak Poisson denklemi, yük olmayan bölgelerde ise Laplace denklemi elde edildi.",
+        spokenTranscript:
+          "Gauss yasasını hatırlayalım: div E eşittir rho bölü epsilon sıfır. E yerine eksi grad V yazdığımızda Laplasyen V eşittir eksi rho bölü epsilon sıfır denklemini yani Poisson denklemini elde ederiz. Yüksüz bölgede ise Laplace denklemine dönüşür.",
+        equations: [
+          "\\nabla^2 V = -\\frac{\\rho}{\\varepsilon_0} \\quad (\\text{Poisson})",
+          "\\nabla^2 V = 0 \\quad (\\text{Laplace})",
+        ],
+        isExamAlert: true,
+        professorQuote:
+          "Arkadaşlar bu Laplace denklemi ve kartezyen koordinatlarda değişkenlerine ayırma yöntemi vizede garanti karşınıza çıkacaktır, bunu sakın unutmayın!",
+      },
+    ],
+    whiteboardExtractions: [
+      {
+        id: "wb-emt3-1",
+        timestamp: "02:15",
+        seconds: 135,
+        title: "Elektrostatik Korunum ve Skaler Potansiyel",
+        latex: "\\nabla \\times \\mathbf{E} = 0 \\iff \\oint_C \\mathbf{E}\\cdot d\\mathbf{l} = 0 \\implies \\mathbf{E} = -\\nabla V",
+        variablesExplanation:
+          "$\\mathbf{E}$: Elektrik alan vektörü (V/m), $V$: Elektrostatik skaler potansiyel (Volt). Eksi işareti enerjinin korunumunu ve alan çizgilerinin potansiyelin azaldığı yöne yöneldiğini belirtir.",
+      },
+      {
+        id: "wb-emt3-2",
+        timestamp: "04:12",
+        seconds: 252,
+        title: "Poisson ve Laplace Denklemleri (Laplasyen Operatörü)",
+        latex: "\\nabla^2 V = \\frac{\\partial^2 V}{\\partial x^2} + \\frac{\\partial^2 V}{\\partial y^2} + \\frac{\\partial^2 V}{\\partial z^2} = -\\frac{\\rho}{\\varepsilon_0}",
+        variablesExplanation:
+          "$\\nabla^2$: İkinci dereceden skaler Laplasyen operatörü, $\\rho$: Hacimsel yük yoğunluğu (C/m³), $\\varepsilon_0$: Boş uzayın elektriksel geçirgenliği ($8.854\\times 10^{-12}\\,\\text{F/m}$).",
+      },
+    ],
+    examAlerts: [
+      {
+        id: "ea-emt3-1",
+        timestamp: "02:05",
+        seconds: 125,
+        severity: "critical",
+        topic: "E = -∇V Eksi İşaretinin Fiziksel Anlamı",
+        professorQuote:
+          "E eşittir eksi grad V tanımındaki eksi işaretinin fiziksel anlamını soracağım: Elektrik alan her zaman azalan potansiyel yönündedir!",
+        examTip:
+          "Potansiyel pozitif yükün etrafında yüksektir, uzaklaştıkça düşer; elektrik alan çizgileri de pozitif yükten dışarı doğru çıktığı için gradyene ters işaretlidir.",
+      },
+      {
+        id: "ea-emt3-2",
+        timestamp: "05:20",
+        seconds: 320,
+        severity: "critical",
+        topic: "Laplace Denklemi Sınır Değer Çözümü (Vize Garanti Soru)",
+        professorQuote:
+          "Arkadaşlar bu Laplace denklemi ve kartezyen koordinatlarda değişkenlerine ayırma yöntemi vizede garanti karşınıza çıkacaktır, bunu sakın unutmayın!",
+        examTip:
+          "$V(x,y) = X(x)Y(y)$ değişkenlere ayırma yönteminde sinüs/kosinüs ve hiperbolik fonksiyonları sınır koşullarına ($V(0,y)=0$, $V(a,y)=0$) göre doğru seçtiğinden emin ol.",
+      },
+    ],
+    conceptMap: [
+      {
+        id: "cm-emt3-1",
+        concept: "Korunumlu Elektrostatik Alan",
+        formula: "\\nabla \\times \\mathbf{E} = 0",
+        description: "Yol bağımsız iş ve skaler potansiyelin varlığının gerek ve yeter koşulu.",
+        connectsTo: "Skaler Potansiyel (V)",
+      },
+      {
+        id: "cm-emt3-2",
+        concept: "Poisson Denklemi",
+        formula: "\\nabla^2 V = -\\rho / \\varepsilon_0",
+        description: "Yük dağılımı ile potansiyel arasındaki temel diferansiyel ilişki.",
+        connectsTo: "Laplace Denklemi (∇²V = 0)",
+      },
+    ],
+    practiceQuestions: [
+      {
+        id: "pq-emt3-1",
+        difficulty: "Vize",
+        question:
+          "Bir bölgede elektrostatik potansiyel $V(x, y, z) = 2x^2 y - 3yz^2$ Volt olarak verilmiştir. $(1, 2, -1)$ noktasındaki elektrik alan vektörünü ($\\mathbf{E}$) ve bu noktadaki hacimsel yük yoğunluğunu ($\\rho$) hesaplayınız.",
+        hint: "$\\mathbf{E} = -\\nabla V$ ve $\\rho = -\\varepsilon_0 \\nabla^2 V$ bağıntılarını kullanınız.",
+        solutionMarkdown:
+          "**1. Elektrik Alanın Hesabı ($\\mathbf{E} = -\\nabla V$):**\n$$\\frac{\\partial V}{\\partial x} = 4xy, \\quad \\frac{\\partial V}{\\partial y} = 2x^2 - 3z^2, \\quad \\frac{\\partial V}{\\partial z} = -6yz$$\n$$\\mathbf{E} = -\\left(4xy\\,\\hat{\\mathbf{i}} + (2x^2 - 3z^2)\\,\\hat{\\mathbf{j}} - 6yz\\,\\hat{\\mathbf{k}}\\right)$$\n\n$(1, 2, -1)$ noktasında değerleri yerine yazalım:\n$$\\mathbf{E}(1, 2, -1) = -\\left(4(1)(2)\\,\\hat{\\mathbf{i}} + (2(1) - 3(-1)^2)\\,\\hat{\\mathbf{j}} - 6(2)(-1)\\,\\hat{\\mathbf{k}}\\right) = -8\\,\\hat{\\mathbf{i}} + 1\\,\\hat{\\mathbf{j}} - 12\\,\\hat{\\mathbf{k}}\\,\\text{V/m}$$\n\n**2. Hacimsel Yük Yoğunluğu (Poisson Denklemi):**\n$$\\nabla^2 V = \\frac{\\partial^2 V}{\\partial x^2} + \\frac{\\partial^2 V}{\\partial y^2} + \\frac{\\partial^2 V}{\\partial z^2} = 4y + 0 - 6y = -2y$$\n$$\\rho = -\\varepsilon_0 \\nabla^2 V = -\\varepsilon_0(-2y) = 2\\varepsilon_0 y$$\n\n$(1, 2, -1)$ noktasında $y=2$ olduğundan:\n$$\\rho = 4\\varepsilon_0 \\approx 35.42\\,\\text{pC/m}^3$$",
+      },
+    ],
+    transcript: [
+      {
+        id: "tr-emt-1",
+        timestamp: "0:41",
+        seconds: 41,
+        text: "Evet arkadaşlar iyi akşamlar diliyorum. Bugünkü dersimize",
+      },
+      {
+        id: "tr-emt-2",
+        timestamp: "0:46",
+        seconds: 46,
+        text: "eee başlamak istiyorum. Bugün siteme eee daha önceki dönemlerde eee online olarak",
+      },
+      {
+        id: "tr-emt-3",
+        timestamp: "0:54",
+        seconds: 54,
+        text: "değil de sınıf ortamında ders olarak anlattığım derslerim var. Onların",
+      },
+      {
+        id: "tr-emt-4",
+        timestamp: "0:58",
+        seconds: 58,
+        text: "videolarını da size yükledim. Eee, bu videoları da lütfen izleyin. Eee, şimdi",
+      },
+      {
+        id: "tr-emt-5",
+        timestamp: "1:05",
+        seconds: 65,
+        text: "derse bakıyorum öğrenci arkadaş da yok. Fakat buna rağmen e birazcık daha ders",
+      },
+      {
+        id: "tr-emt-6",
+        timestamp: "1:10",
+        seconds: 70,
+        text: "işleyeyim. Bunlar da en azından sistemde size yükleniyordur. Yani sizin sisteme",
+      },
+      {
+        id: "tr-emt-7",
+        timestamp: "1:15",
+        seconds: 75,
+        text: "de yükleniyordur. Bunlardan lütfen e izlerseniz iyi olur.",
+      },
+      {
+        id: "tr-emt-8",
+        timestamp: "1:35",
+        seconds: 95,
+        text: "Bugün Elektrostatik Potansiyel, Poisson ve Laplace denklemlerine giriş yapacağız.",
+      },
+      {
+        id: "tr-emt-9",
+        timestamp: "2:04",
+        seconds: 124,
+        text: "Bildiğiniz gibi elektrostatik alan korunumlu bir alandır, yani rotasyoneli özdeş olarak sıfırdır.",
+      },
+      {
+        id: "tr-emt-10",
+        timestamp: "2:28",
+        seconds: 148,
+        text: "Vektör analizinden biliyoruz ki rotasyoneli sıfır olan her vektör bir skaler fonksiyonun gradyeni olarak ifade edilebilir.",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-emt-11",
+        timestamp: "2:55",
+        seconds: 175,
+        text: "Dolayısıyla E eşittir eksi grad V olarak tanımlıyoruz; buradaki eksi işareti elektrik alanın potansiyelin azaldığı yöne işaret ettiğini belirtir.",
+      },
+      {
+        id: "tr-emt-12",
+        timestamp: "3:30",
+        seconds: 210,
+        text: "Şimdi Gauss yasasını diferansiyel formda yazalım: div E eşittir rho bölü epsilon sıfır.",
+      },
+      {
+        id: "tr-emt-13",
+        timestamp: "4:05",
+        seconds: 245,
+        text: "E yerine eksi grad V yazdığımızda Laplasyen V eşittir eksi rho bölü epsilon sıfır denklemini elde ederiz ki buna Poisson denklemi diyoruz.",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-emt-14",
+        timestamp: "4:48",
+        seconds: 288,
+        text: "Eğer baktığımız bölgede serbest yük yoksa yani rho eşittir sıfır ise bu denklem Laplace denklemine dönüşür.",
+      },
+      {
+        id: "tr-emt-15",
+        timestamp: "5:20",
+        seconds: 320,
+        text: "Arkadaşlar bu Laplace denklemi ve kartezyen koordinatlarda değişkenlerine ayırma yöntemi vizede garanti karşınıza çıkacaktır, bunu sakın unutmayın!",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-emt-16",
+        timestamp: "6:15",
+        seconds: 375,
+        text: "Şimdi iki paralel iletken levha arasındaki potansiyel dağılımını bu sınır koşullarıyla çözerek başlayalım.",
+      },
+    ],
+    createdAt: "2026-11-02T14:00:00Z",
   },
   {
     id: "lec-maxwell-01",
@@ -374,6 +645,47 @@ export const INITIAL_LECTURES: Lecture[] = [
         hint: "Plakalar arasında iletim akımı $I_{\\text{iç}} = 0$'dır. Düzgün elektrik alan $E(t) = \\frac{Q(t)}{\\varepsilon_0 \\pi R^2}$ üzerinden $r$ yarıçaplı Amper halkasından geçen $\\Phi_E$'yi hesaplayın.",
         solutionMarkdown:
           "**1. $r < R$ Bölgesi (Plakalar İçi):**\nToplam elektrik alan $E = \\frac{Q}{\\varepsilon_0 \\pi R^2} \\implies \\frac{dE}{dt} = \\frac{I}{\\varepsilon_0 \\pi R^2}$.\n$r$ yarıçaplı daireden geçen akı türevi:\n$$\\frac{d\\Phi_E}{dt} = (\\pi r^2)\\frac{dE}{dt} = \\frac{I r^2}{\\varepsilon_0 R^2}$$\nAmpère-Maxwell yasasından:\n$$B(2\\pi r) = \\mu_0\\varepsilon_0 \\frac{I r^2}{\\varepsilon_0 R^2} \\implies B(r) = \\frac{\\mu_0 I r}{2\\pi R^2}$$\n\n**2. $r > R$ Bölgesi (Plakalar Dışı):**\nTüm elektrik akısı halkanın içinde kaldığından $\\varepsilon_0 \\frac{d\\Phi_E}{dt} = I$:\n$$B(2\\pi r) = \\mu_0 I \\implies B(r) = \\frac{\\mu_0 I}{2\\pi r}$$",
+      },
+    ],
+    transcript: [
+      {
+        id: "tr-em-1",
+        timestamp: "02:30",
+        seconds: 150,
+        text: "Düz yüzeyden akım geçiyor ama kondansatör plakaları arasından geçen balon yüzeyden iletim akımı geçmiyor!",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-em-2",
+        timestamp: "03:10",
+        seconds: 190,
+        text: "Süreklilik denklemini kurtarmak için Ampère yasasına epsilon sıfır dE/dt terimini eklemek zorundayız.",
+      },
+      {
+        id: "tr-em-3",
+        timestamp: "21:00",
+        seconds: 1260,
+        text: "İşte klasik elektrodinamiğin tüm özeti bu dört satırda; Gauss, manyetik Gauss, Faraday ve Ampère-Maxwell.",
+      },
+      {
+        id: "tr-em-4",
+        timestamp: "21:40",
+        seconds: 1300,
+        text: "Manyetik tek kutup (monopol) gözlenmediği için div B her zaman sıfırdır.",
+      },
+      {
+        id: "tr-em-5",
+        timestamp: "35:20",
+        seconds: 2120,
+        text: "Rotasyonelin rotasyoneli vektör özdeşliğini ezbere bileceksiniz: grad div eksi Laplasyen!",
+        isProfessorHighlight: true,
+      },
+      {
+        id: "tr-em-6",
+        timestamp: "36:00",
+        seconds: 2160,
+        text: "Boş uzayda yük yok, div E sıfır, geriye doğrudan ışık hızında yayılan dalga denklemi kalıyor.",
+        isProfessorHighlight: true,
       },
     ],
     createdAt: "2026-10-29T11:00:00Z",

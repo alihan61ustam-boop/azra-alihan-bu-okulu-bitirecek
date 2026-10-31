@@ -5,6 +5,7 @@ import {
   CourseResource,
   GeminiModelId,
   Lecture,
+  TranscriptItem,
 } from "@/types/academic";
 
 export const CANDIDATE_MODELS: GeminiModelId[] = [
@@ -298,6 +299,71 @@ export function robustJsonParse<T = Record<string, unknown>>(raw: string): T {
   }
 }
 
+export function generateFallbackTranscript(
+  timeline: Array<{
+    timestamp?: string;
+    seconds?: number;
+    spokenTranscript?: string;
+    summary?: string;
+    title?: string;
+  }>,
+  executiveSummary?: string,
+  baseId = Date.now()
+): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let counter = 0;
+
+  if (Array.isArray(timeline) && timeline.length > 0) {
+    for (const seg of timeline) {
+      const baseSec = Number(seg.seconds ?? 0);
+      const textToSplit =
+        seg.spokenTranscript?.trim() ||
+        seg.summary?.trim() ||
+        seg.title?.trim() ||
+        "";
+
+      const sentences = textToSplit
+        .split(/(?<=[.!?])\s+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 3);
+
+      if (sentences.length === 0 && textToSplit) {
+        sentences.push(textToSplit);
+      }
+
+      sentences.forEach((sentence, idx) => {
+        const sentenceSec = Math.max(0, baseSec + idx * 8);
+        items.push({
+          id: `tr-${baseId}-${counter++}`,
+          timestamp: formatSeconds(sentenceSec),
+          seconds: sentenceSec,
+          text: sentence,
+          isProfessorHighlight: idx === 0 && Boolean(seg.spokenTranscript),
+        });
+      });
+    }
+  }
+
+  if (items.length === 0 && executiveSummary) {
+    const sentences = executiveSummary
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 3);
+    sentences.forEach((sentence, idx) => {
+      const sec = idx * 12;
+      items.push({
+        id: `tr-${baseId}-${counter++}`,
+        timestamp: formatSeconds(sec),
+        seconds: sec,
+        text: sentence,
+        isProfessorHighlight: idx === 0,
+      });
+    });
+  }
+
+  return items;
+}
+
 export interface ProcessLectureOptions {
   apiKey: string;
   model: GeminiModelId;
@@ -395,6 +461,7 @@ Verilen ders videosunu, ses kaydını, tahta karelerini veya ders notunu inceley
 4) examAlerts: Hocanın "bu kısım sınavda çıkabilir", "bunu sakın unutmayın", "vizede/finalde sorarım" dediği veya ses/bağlam olarak çok vurguladığı kritik noktalar (timestamp, seconds, severity: "critical" | "important", topic, professorQuote, examTip).
 5) conceptMap: Kavram haritası düğümleri (concept, formula [saf LaTeX], description, connectsTo).
 6) practiceQuestions: Bu dersten sınavda çıkabilecek 2 veya 3 adet çalışma sorusu (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
+7) transcript: Google Drive / Vids transkript paneli gibi videoda geçen cümle cümle konuşma dökümü (her eleman: { timestamp: "MM:SS", seconds: sayısal saniye, text: "Hocanın söylediği tam cümle", isProfessorHighlight: boolean }). Ders boyunca geçen konuşmaları eksiksiz cümleler halinde zaman damgalarıyla dök.
 
 ÖNEMLİ BİÇİMLENDİRME KURALI:
 Tüm LaTeX formüllerindeki ters slash (backslash) işaretlerini JSON formatında geçerli kalması için ÇİFT TERS SLASH (örnek: \\\\nabla, \\\\vec, \\\\frac, \\\\partial) olarak yaz. Asla tek ters slash bırakma.
@@ -527,6 +594,30 @@ SADECE geçerli bir JSON nesnesi döndür.`;
           })
         )
       : [],
+    transcript:
+      Array.isArray(parsed.transcript) && parsed.transcript.length > 0
+        ? (parsed.transcript as Array<Record<string, unknown>>).map((tr, i) => ({
+            id: `tr-${nowId}-${i}`,
+            timestamp: String(tr.timestamp || formatSeconds(Number(tr.seconds ?? i * 15))),
+            seconds: Number(tr.seconds ?? i * 15),
+            text: String(tr.text || ""),
+            isProfessorHighlight: Boolean(tr.isProfessorHighlight),
+          }))
+        : generateFallbackTranscript(
+            Array.isArray(parsed.timeline)
+              ? (parsed.timeline as Array<{
+                  timestamp?: string;
+                  seconds?: number;
+                  spokenTranscript?: string;
+                  summary?: string;
+                  title?: string;
+                }>)
+              : [],
+            typeof parsed.executiveSummary === "string"
+              ? parsed.executiveSummary
+              : "",
+            nowId
+          ),
   };
 }
 
@@ -574,7 +665,10 @@ export async function streamCourseTutorChat(
       const alerts = lec.examAlerts
         .map((a) => `  - [${a.timestamp}] SINAV UYARISI (${a.topic}): "${a.professorQuote}" -> İpucu: ${a.examTip}`)
         .join("\n");
-      return `DERS KAYDI: ${lec.title} (${lec.recordedDate})\nÖzet: ${lec.executiveSummary}\nTahta Formülleri:\n${formulas}\nHoca Vurguları:\n${alerts}`;
+      const transcriptSnippet = lec.transcript && lec.transcript.length > 0
+        ? lec.transcript.slice(0, 30).map((t) => `  [${t.timestamp}] ${t.text}`).join("\n")
+        : "";
+      return `DERS KAYDI: ${lec.title} (${lec.recordedDate})\nÖzet: ${lec.executiveSummary}\nTahta Formülleri:\n${formulas}\nHoca Vurguları:\n${alerts}${transcriptSnippet ? `\nKonuşma Dökümü (Transkript):\n${transcriptSnippet}` : ""}`;
     })
     .join("\n\n---\n\n");
 
@@ -594,11 +688,17 @@ ${lecturesDigest || "Henüz ders kaydı eklenmemiş."}
 BU DERSE EKLENMİŞ AKADEMİK KAYNAKLAR:
 ${resourcesDigest || "Ek kaynak yok."}
 
-KESİN KURALLARIN:
+KESİN PEDAGOJİK VE AKADEMİK KURALLARIN:
 1. Yalnızca "${course.title}" dersi ve bu ders için gerekli matematiksel fizik araçları kapsamında yanıt ver. Başka derslerin konularıyla bağlamı karıştırma.
 2. Azra'ya karşı her zaman motive edici, sabırlı, berrak ve akademik olarak titiz bir Türkçe kullan.
-3. Tüm matematiksel ve fiziksel denklemleri standart LaTeX formatında yaz: satır içi için $...$ ve blok denklemler için kendi satırında $$...$$ kullan.
-4. Sorulan konu hocanın sınav uyarılarında (SINAV UYARISI) geçiyorsa mutlaka zaman damgasını belirterek Azra'ya hatırlat!`;
+3. Açıklamalarını mantıksal bir pedagojik akışla yapılandır:
+   - **Fiziksel Sezgi & Kavramsal Temel:** (Gerektiğinde Thales kehribar gözlemi, elektrostatik CGS vs SI katsayı farkı, Newton mekaniği benzetimleri gibi sezgisel köprüler kur).
+   - **Matematiksel Formülasyon & Vektör Analizi:** (Konum vektörleri $\\vec{r}_1, \\vec{r}_2$, bağıl konum $\\vec{r}_{12} = \\vec{r}_2 - \\vec{r}_1$, gradyen, diverjans ve rotasyonel adımları).
+   - **Adım Adım İspat / Çözüm:** Kritik matematiksel adımları atlamadan, sınır koşullarını ve integralleri adım adım göster.
+   - **Hoca Vurguları & Sınav Uyarıları:** Hocanın ders kayıtlarında belirttiği sınav uyarılarını (zaman damgası ile) ve öğrencilerin en sık hata yaptığı işaret veya birim tuzaklarını hatırlat.
+4. Tüm matematiksel ve fiziksel denklemleri standart LaTeX formatında yaz: satır içi için $...$ ve blok denklemler için kendi satırında $$...$$ kullan.
+5. Sorulan konu hocanın sınav uyarılarında (SINAV UYARISI) geçiyorsa mutlaka zaman damgasını belirterek Azra'ya hatırlat!
+6. Her zaman Azra'nın bu okulu yüksek dereceyle bitireceğine tam güvenen, destekleyici ve ilham verici bir üslup takın.`;
 
   const recentHistory = history.slice(-10).map((m) => ({
     role: m.role === "assistant" ? ("model" as const) : ("user" as const),

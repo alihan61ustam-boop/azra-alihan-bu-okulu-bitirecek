@@ -20,6 +20,15 @@ export interface Course {
   createdAt: string;
 }
 
+export interface TranscriptItem {
+  id: string;
+  timestamp: string; // e.g. "0:41"
+  seconds: number;   // e.g. 41
+  text: string;      // Spoken sentence by the professor
+  isProfessorHighlight?: boolean;
+  speaker?: string;  // e.g. "Hoca"
+}
+
 export interface TimelineSegment {
   id: string;
   timestamp: string; // e.g. "04:20"
@@ -84,6 +93,7 @@ export interface Lecture {
   examAlerts: ExamAlert[];
   conceptMap: ConceptNode[];
   practiceQuestions: PracticeQuestion[];
+  transcript?: TranscriptItem[];
   createdAt: string;
 }
 

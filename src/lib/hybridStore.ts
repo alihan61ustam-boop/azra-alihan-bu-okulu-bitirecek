@@ -46,9 +46,24 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
     const courses: Course[] = rawCourses
       ? JSON.parse(rawCourses)
       : INITIAL_COURSES;
-    const lectures: Lecture[] = rawLectures
+    const baseLectures: Lecture[] = rawLectures
       ? JSON.parse(rawLectures)
       : INITIAL_LECTURES;
+
+    // Ensure any new seed lectures (e.g. lec-emt-03) and synchronized transcripts are merged
+    const lectures: Lecture[] = [...baseLectures];
+    for (const seedLec of INITIAL_LECTURES) {
+      const existingIdx = lectures.findIndex((l) => l.id === seedLec.id);
+      if (existingIdx === -1) {
+        lectures.push(seedLec);
+      } else if (!lectures[existingIdx].transcript && seedLec.transcript) {
+        lectures[existingIdx] = {
+          ...lectures[existingIdx],
+          transcript: seedLec.transcript,
+        };
+      }
+    }
+
     const resources: CourseResource[] = rawResources
       ? JSON.parse(rawResources)
       : INITIAL_RESOURCES;
@@ -56,7 +71,7 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
       ? JSON.parse(rawChats)
       : INITIAL_CHATS;
 
-    if (!rawCourses) {
+    if (!rawCourses || lectures.length > baseLectures.length) {
       saveLocalWorkspace({ courses, lectures, resources, chats });
     }
 
