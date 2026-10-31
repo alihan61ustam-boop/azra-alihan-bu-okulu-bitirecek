@@ -220,6 +220,84 @@ export async function getMediaDurationLabel(file: File): Promise<string> {
   });
 }
 
+export function robustJsonParse<T = Record<string, unknown>>(raw: string): T {
+  const cleaned = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+
+  // 1. Direct standard parse
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch (e1) {
+    // 2. Character-by-character LaTeX backslash repair
+    try {
+      let inString = false;
+      let escaped = false;
+      let result = "";
+
+      for (let i = 0; i < cleaned.length; i++) {
+        const char = cleaned[i];
+
+        if (escaped) {
+          escaped = false;
+          if (char === '"' || char === '\\' || char === '/') {
+            result += char;
+          } else if (char === 'b' || char === 'f') {
+            result += char;
+          } else if (char === 'n' || char === 'r' || char === 't') {
+            const peekWord = cleaned.slice(i, i + 5);
+            // If \nabla, \nu, \times, \theta, \rho -> double escape for LaTeX
+            if (/^[a-zA-Z]{2,}/.test(peekWord)) {
+              result += '\\' + char;
+            } else {
+              result += char;
+            }
+          } else if (char === 'u' && /^[0-9a-fA-F]{4}/.test(cleaned.slice(i + 1, i + 5))) {
+            result += char;
+          } else {
+            // Illegal JSON escape (e.g. \v for \vec, \p for \phi, \a for \alpha, \d for \delta, \f for \frac)
+            result += '\\' + char;
+          }
+          continue;
+        }
+
+        if (char === '\\' && inString) {
+          escaped = true;
+          result += '\\';
+          continue;
+        }
+
+        if (char === '"') {
+          inString = !inString;
+          result += char;
+          continue;
+        }
+
+        if (inString && (char === '\n' || char === '\r')) {
+          result += char === '\n' ? '\\n' : '\\r';
+          continue;
+        }
+
+        result += char;
+      }
+
+      return JSON.parse(result) as T;
+    } catch {
+      // 3. Fallback: regex replace any backslash not followed by valid escape
+      try {
+        const relaxed = cleaned.replace(/\\(?!["\\/])/g, "\\\\");
+        return JSON.parse(relaxed) as T;
+      } catch {
+        throw new Error(
+          `JSON biçimlendirme hatası giderilemedi (${extractCleanErrorMessage(e1)}). Lütfen tekrar deneyin.`
+        );
+      }
+    }
+  }
+}
+
 export interface ProcessLectureOptions {
   apiKey: string;
   model: GeminiModelId;
@@ -318,6 +396,8 @@ Verilen ders videosunu, ses kaydını, tahta karelerini veya ders notunu inceley
 5) conceptMap: Kavram haritası düğümleri (concept, formula [saf LaTeX], description, connectsTo).
 6) practiceQuestions: Bu dersten sınavda çıkabilecek 2 veya 3 adet çalışma sorusu (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
 
+ÖNEMLİ BİÇİMLENDİRME KURALI:
+Tüm LaTeX formüllerindeki ters slash (backslash) işaretlerini JSON formatında geçerli kalması için ÇİFT TERS SLASH (örnek: \\\\nabla, \\\\vec, \\\\frac, \\\\partial) olarak yaz. Asla tek ters slash bırakma.
 SADECE geçerli bir JSON nesnesi döndür.`;
 
   contentParts.push({
@@ -365,11 +445,7 @@ SADECE geçerli bir JSON nesnesi döndür.`;
 
   onProgress?.("Yapılandırılmış LaTeX ders notları oluşturuluyor...", 92);
 
-  const cleaned = responseText
-    .replace(/^```json\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
-  const parsed = JSON.parse(cleaned);
+  const parsed = robustJsonParse<Record<string, unknown>>(responseText);
 
   const nowId = Date.now();
 
@@ -388,8 +464,9 @@ SADECE geçerli bir JSON nesnesi döndür.`;
     mediaMimeType,
     durationLabel,
     executiveSummary:
-      parsed.executiveSummary ||
-      `${lectureTitle} dersinin temel fiziksel prensipleri ve matematiksel formülasyonu analiz edildi.`,
+      typeof parsed.executiveSummary === "string" && parsed.executiveSummary.trim()
+        ? parsed.executiveSummary
+        : `${lectureTitle} dersinin temel fiziksel prensipleri ve matematiksel formülasyonu analiz edildi.`,
     timeline: Array.isArray(parsed.timeline)
       ? parsed.timeline.map((t: Record<string, unknown>, i: number) => ({
           id: `seg-${nowId}-${i}`,
