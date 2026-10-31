@@ -34,6 +34,7 @@ import { ApiKeysConfig, Course, Lecture, TranscriptItem } from "@/types/academic
 import { LatexFormula, MathMarkdown } from "@/components/MathMarkdown";
 import { loadMediaBlob, loadMediaObjectUrl, saveMediaBlob } from "@/lib/mediaDb";
 import { processLectureMultimodal } from "@/lib/gemini/client";
+import { verifyAndFixTranscriptWithMediaBlob } from "@/lib/audioExtractor";
 import {
   formatRealTranscriptToGoogleDriveStyle,
   repairLectureIfNeeded,
@@ -297,22 +298,47 @@ export function LectureNoteViewer({
     }
   };
 
-  // Automatically extract and transcribe the REAL audio of any uploaded video stored in IndexedDB that hasn't been audio-transcribed yet
+  // Automatically extract and transcribe the REAL audio of any uploaded video stored in IndexedDB that hasn't been audio-transcribed yet, OR run 4-Point Acoustic Checkpoint verification on existing transcripts
+  const acousticVerifiedIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    if (!activeLecture || !activeLecture.mediaBlobKey || reprocessing) {
+      return;
+    }
+
+    if (!activeLecture.isRealAudioTranscript && apiKeys?.geminiApiKey) {
+      if (!autoTranscribedIdsRef.current.has(activeLecture.id)) {
+        autoTranscribedIdsRef.current.add(activeLecture.id);
+        handleReanalyzeCurrentVideo();
+      }
+      return;
+    }
+
     if (
-      !activeLecture ||
-      !activeLecture.mediaBlobKey ||
-      activeLecture.isRealAudioTranscript ||
-      reprocessing ||
-      !apiKeys?.geminiApiKey
+      activeLecture.transcript &&
+      activeLecture.transcript.length > 0 &&
+      !acousticVerifiedIdsRef.current.has(activeLecture.id)
     ) {
-      return;
+      acousticVerifiedIdsRef.current.add(activeLecture.id);
+      const targetLec = activeLecture;
+      loadMediaBlob(targetLec.mediaBlobKey!).then(async (blob) => {
+        if (!blob || !targetLec.transcript) return;
+        try {
+          const { items: verifiedItems, anyRecalibrated } =
+            await verifyAndFixTranscriptWithMediaBlob(
+              blob,
+              targetLec.transcript
+            );
+          if (anyRecalibrated) {
+            onUpdateLecture?.({
+              ...targetLec,
+              transcript: verifiedItems,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      });
     }
-    if (autoTranscribedIdsRef.current.has(activeLecture.id)) {
-      return;
-    }
-    autoTranscribedIdsRef.current.add(activeLecture.id);
-    handleReanalyzeCurrentVideo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLecture?.id, activeLecture?.mediaBlobKey, activeLecture?.isRealAudioTranscript, apiKeys?.geminiApiKey]);
 

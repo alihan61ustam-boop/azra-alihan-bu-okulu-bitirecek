@@ -13,6 +13,7 @@ import {
 } from "@/lib/emtLectureData";
 import {
   extractWavChunksFromMediaBlob,
+  verifyAndCalibrateBlockWith4Checkpoints,
   WavChunk,
 } from "@/lib/audioExtractor";
 
@@ -658,20 +659,34 @@ async function transcribeSingleAudioChunk(
   chunk: WavChunk,
   nowId: number
 ): Promise<TranscriptItem[]> {
-  const maxMmSs = formatSeconds(chunk.durationSec);
-  const prompt = `Bu ${chunk.durationSec} saniyelik (${maxMmSs} uzunluğundaki) gerçek ders ses kaydını dikkatle dinle.
+  const burstsText =
+    chunk.speechBursts && chunk.speechBursts.length > 0
+      ? chunk.speechBursts
+          .map((b) => `${b.startRelSec}s-${b.endRelSec}s`)
+          .join(", ")
+      : `0s-${chunk.durationSec}s`;
+  const [cp0, cp1, cp2, cp3] = chunk.acousticCheckpoints || [
+    0,
+    Math.floor(chunk.durationSec * 0.33),
+    Math.floor(chunk.durationSec * 0.66),
+    chunk.durationSec - 1,
+  ];
+
+  const prompt = `Bu ${chunk.durationSec} saniyelik (1 dakikalık) gerçek ders ses kaydını dikkatle dinle.
+FİZİKSEL SES DALGASI (AKUSTİK) BİLGİSİ:
+- Bu 1 dakikalık ses bloğunda hocanın aktif konuştuğu saniye aralıkları: [${burstsText}]
+- Blok içindeki 4 akustik referans noktası: [Başlangıç: ${cp0}. sn, 2. Nokta: ${cp1}. sn, 3. Nokta: ${cp2}. sn, Bitiş: ${cp3}. sn]
+
 GÖREVİN:
-Ses kaydında hocanın ağzından çıkan GERÇEK SÖZLERİ BİREBİR (kelimesi kelimesine, hiçbir şeyi özetlemeden, değiştirmeden ve uydurmadan) Google Drive video transkripti gibi her 4-5 saniyede bir zaman damgalı alt yazı satırları olarak JSON dizisi halinde döndür.
+Ses kaydında hocanın ağzından çıkan GERÇEK SÖZLERİ BİREBİR (kelimesi kelimesine, hiçbir şeyi özetlemeden ve uydurmadan) Google Drive video transkripti gibi her 4-5 saniyede bir zaman damgalı alt yazı satırları olarak JSON dizisi halinde döndür.
 KESİN KURALLAR:
-1. SADECE ses kaydında gerçekten duyduğun sözleri yaz. Asla ses kaydında olmayan bir cümle veya şablon uydurma!
-2. "time" alanı bu ses parçasının başından ("00:00") sonuna ("${maxMmSs}") kadar geçen süreyi "DD:SS" ("MM:SS") formatında göstermelidir (örnek: "00:00", "00:05", "00:12", "00:58", "01:02", "01:15"). Dikkat: 1 dakika 2 saniyeyi kesinlikle "01:02" (veya sec: 62) olarak yaz, asla 102 yazma!
-3. "sec" alanı "time" değerinin saniye karşılığıdır (örnek: "01:02" için sec: 62).
-4. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
+1. SADECE ses kaydında gerçekten duyduğun sözleri yaz. Asla ses kaydında olmayan bir cümle uydurma!
+2. "sec" alanı bu 1 dakikalık ses kaydının başından (0. saniyeden) itibaren geçen TAM SAYI saniyedir (0 ile ${chunk.durationSec - 1} arasında tam sayı, örnek: 0, 3, 8, 14, 22, 35, 48, 56). Sessiz saniyelere cümle koyma, konuşmanın gerçekten duyulduğu saniyeyi yaz.
+3. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
 JSON Dizisi Şeması:
 [
   {
-    "time": "00:00",
-    "sec": 0,
+    "sec": ${cp0},
     "text": "Ses kaydında duyulan birebir gerçek sözler...",
     "isImportant": false,
     "importanceType": "casual" | "exam_alert" | "formula" | "core_concept",
@@ -731,7 +746,7 @@ JSON Dizisi Şeması:
             .map((it) => Number(it.sec ?? it.seconds ?? it.offsetSec))
             .filter((n) => Number.isFinite(n));
 
-          return arr
+          const rawChunkItems: TranscriptItem[] = arr
             .map((item, idx) => {
               const rawSec =
                 item.time ??
@@ -771,7 +786,7 @@ JSON Dizisi Şeması:
                   : "casual");
 
               return {
-                id: `tr-chunk-${nowId}-${chunk.index}-${idx}`,
+                id: `tr-60s-${nowId}-${chunk.index}-${idx}`,
                 timestamp: formatSecToTimestamp(absSec),
                 seconds: absSec,
                 text,
@@ -790,6 +805,16 @@ JSON Dizisi Şeması:
               };
             })
             .filter((t) => t.text.length > 1);
+
+          // 4-Point Checkpoint Verification inside this 1-minute block before moving on
+          const { items: verifiedBlockItems } =
+            verifyAndCalibrateBlockWith4Checkpoints(
+              rawChunkItems,
+              chunk.startSec,
+              chunk.durationSec,
+              chunk.voicedRelSeconds
+            );
+          return verifiedBlockItems;
         }
       }
     } catch {
@@ -904,11 +929,11 @@ export async function processLectureMultimodal(
       10
     );
 
-    // 1. EXTRACT & TRANSCRIBE REAL AUDIO FROM VIDEO/AUDIO FILE
+    // 1. EXTRACT & TRANSCRIBE REAL AUDIO FROM VIDEO/AUDIO FILE (1-MINUTE BLOCKS + 4-POINT CHECKPOINT VERIFICATION)
     try {
       const { chunks, totalDurationSec } = await extractWavChunksFromMediaBlob(
         file,
-        120,
+        60,
         6000
       );
       if (totalDurationSec > 0) {
