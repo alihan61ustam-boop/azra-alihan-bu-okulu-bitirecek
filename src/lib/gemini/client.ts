@@ -8,16 +8,30 @@ import {
   TranscriptItem,
 } from "@/types/academic";
 import {
-  EMT_LECTURE_3_SON_40_TEMPLATE,
-  ensureDenseSecondBySecondTranscript,
-  repairLectureIfNeeded,
+  formatRealTranscriptToGoogleDriveStyle,
+  formatSecToTimestamp,
 } from "@/lib/emtLectureData";
+import {
+  extractWavChunksFromMediaBlob,
+  WavChunk,
+} from "@/lib/audioExtractor";
 
 export const CANDIDATE_MODELS: GeminiModelId[] = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-lite-latest",
+  "gemini-3.1-flash-lite-preview",
   "gemini-3-flash-preview",
   "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
   "gemini-3.1-pro-preview",
+];
+
+const AUDIO_WORKER_MODELS: string[] = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-lite-latest",
+  "gemini-3.1-flash-lite-preview",
+  "gemini-3-flash-preview",
 ];
 
 export function extractCleanErrorMessage(err: unknown): string {
@@ -69,9 +83,12 @@ export async function validateGeminiApiKey(
   const testList = Array.from(
     new Set<GeminiModelId>([
       model,
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
+      "gemini-flash-lite-latest",
+      "gemini-3.1-flash-lite-preview",
       "gemini-3-flash-preview",
       "gemini-3.5-flash",
-      "gemini-3.1-flash-lite",
     ])
   );
 
@@ -520,6 +537,252 @@ export function generateFallbackTranscript(
   return items;
 }
 
+function parseRelativeSecFromChunkItem(
+  rawVal: unknown,
+  chunk: WavChunk,
+  itemIndex: number,
+  totalItems: number
+): number {
+  if (typeof rawVal === "number" && Number.isFinite(rawVal)) {
+    // Check if the model returned M.SS format like 1.30
+    const asStr = String(rawVal);
+    if (asStr.includes(".") && rawVal < 10) {
+      const [mPart, sPart] = asStr.split(".");
+      if (sPart && sPart.length === 2 && Number(sPart) < 60 && Number(mPart) > 0) {
+        const mmss = Number(mPart) * 60 + Number(sPart);
+        if (mmss <= chunk.durationSec + 5) return chunk.startSec + mmss;
+      }
+    }
+    if (rawVal >= chunk.startSec && chunk.startSec >= 200 && rawVal <= chunk.endSec + 10) {
+      return Math.round(rawVal);
+    }
+    return chunk.startSec + Math.max(0, Math.min(chunk.durationSec, Math.round(rawVal)));
+  }
+
+  if (typeof rawVal === "string") {
+    const trimmed = rawVal.trim();
+    if (trimmed.includes(":")) {
+      const parts = trimmed.split(":").map((p) => parseInt(p, 10));
+      if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        const parsedSec = parts[0] * 60 + parts[1];
+        if (
+          parsedSec >= chunk.startSec &&
+          chunk.startSec >= 200 &&
+          parsedSec <= chunk.endSec + 10
+        ) {
+          return parsedSec;
+        }
+        return (
+          chunk.startSec +
+          Math.max(0, Math.min(chunk.durationSec, parsedSec))
+        );
+      }
+    }
+    const num = parseFloat(trimmed);
+    if (!isNaN(num)) {
+      if (num >= chunk.startSec && chunk.startSec >= 200 && num <= chunk.endSec + 10) {
+        return Math.round(num);
+      }
+      return chunk.startSec + Math.max(0, Math.min(chunk.durationSec, Math.round(num)));
+    }
+  }
+
+  // Proportional fallback within the chunk if sec is missing
+  const ratio = itemIndex / Math.max(1, totalItems);
+  return Math.round(chunk.startSec + ratio * chunk.durationSec);
+}
+
+async function transcribeSingleAudioChunk(
+  ai: GoogleGenAI,
+  chunk: WavChunk,
+  nowId: number
+): Promise<TranscriptItem[]> {
+  const prompt = `Bu ${chunk.durationSec} saniyelik gerçek ders ses kaydını dikkatle dinle.
+GÖREVİN:
+Ses kaydında hocanın ağzından çıkan GERÇEK SÖZLERİ BİREBİR (kelimesi kelimesine, hiçbir şeyi özetlemeden, değiştirmeden ve uydurmadan) Google Drive video transkripti gibi her 4-5 saniyede bir zaman damgalı alt yazı satırları olarak JSON dizisi halinde döndür.
+KESİN KURALLAR:
+1. SADECE ses kaydında gerçekten duyduğun sözleri yaz. Asla ses kaydında olmayan bir cümle veya şablon uydurma!
+2. "sec" alanı bu ses kaydının başından (0. saniyeden) itibaren geçen TAM SAYI saniyedir (0 ile ${chunk.durationSec} arasında sayı, örn: 0, 4, 9, 14, 19, 25, 65, 120...).
+3. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
+JSON Dizisi Şeması:
+[
+  {
+    "sec": 0,
+    "text": "Ses kaydında duyulan birebir gerçek sözler...",
+    "isImportant": false,
+    "importanceType": "casual" | "exam_alert" | "formula" | "core_concept",
+    "importanceNote": "Önemliyse kısa etiket"
+  }
+]`;
+
+  // Rotate primary worker model by chunk index to distribute rate limits
+  const orderedModels = [
+    AUDIO_WORKER_MODELS[chunk.index % AUDIO_WORKER_MODELS.length],
+    ...AUDIO_WORKER_MODELS.filter(
+      (_, idx) => idx !== chunk.index % AUDIO_WORKER_MODELS.length
+    ),
+  ];
+
+  for (const m of orderedModels) {
+    try {
+      const res = await ai.models.generateContent({
+        model: m,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  mimeType: "audio/wav",
+                  data: chunk.base64Wav,
+                },
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          maxOutputTokens: 16384,
+        },
+      });
+
+      if (res.text) {
+        const parsed = robustJsonParse<unknown>(res.text);
+        const arr: Array<Record<string, unknown>> = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray((parsed as Record<string, unknown>)?.transcript)
+          ? ((parsed as Record<string, unknown>).transcript as Array<
+              Record<string, unknown>
+            >)
+          : Array.isArray((parsed as Record<string, unknown>)?.items)
+          ? ((parsed as Record<string, unknown>).items as Array<
+              Record<string, unknown>
+            >)
+          : [];
+
+        if (arr.length > 0) {
+          return arr
+            .map((item, idx) => {
+              const rawSec =
+                item.sec ?? item.seconds ?? item.offsetSec ?? item.timestamp;
+              const absSec = parseRelativeSecFromChunkItem(
+                rawSec,
+                chunk,
+                idx,
+                arr.length
+              );
+              const text = String(item.text || "").trim();
+              const lower = text.toLowerCase();
+              const isImportant =
+                Boolean(item.isImportant) ||
+                lower.includes("sınav") ||
+                lower.includes("vize") ||
+                lower.includes("final") ||
+                lower.includes("dikkat") ||
+                lower.includes("unutmayın") ||
+                lower.includes("eşittir");
+              const importanceType: TranscriptItem["importanceType"] =
+                (item.importanceType as TranscriptItem["importanceType"]) ||
+                (lower.includes("sınav") ||
+                lower.includes("vize") ||
+                lower.includes("unutmayın")
+                  ? "exam_alert"
+                  : lower.includes("eşittir") ||
+                    lower.includes("integral") ||
+                    lower.includes("grad")
+                  ? "formula"
+                  : isImportant
+                  ? "core_concept"
+                  : "casual");
+
+              return {
+                id: `tr-chunk-${nowId}-${chunk.index}-${idx}`,
+                timestamp: formatSecToTimestamp(absSec),
+                seconds: absSec,
+                text,
+                isImportant,
+                importanceType,
+                importanceNote: item.importanceNote
+                  ? String(item.importanceNote)
+                  : isImportant
+                  ? importanceType === "exam_alert"
+                    ? "🔥 Sınav Vurgusu"
+                    : importanceType === "formula"
+                    ? "📐 Formül Anlatımı"
+                    : "💡 Önemli Nokta"
+                  : undefined,
+                isProfessorHighlight: isImportant,
+              };
+            })
+            .filter((t) => t.text.length > 1);
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  // Fallback to dedicated speech-to-text model gemini-3.5-transcribe
+  try {
+    const sttRes = await ai.models.generateContent({
+      model: "gemini-3.5-transcribe",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              inlineData: {
+                mimeType: "audio/wav",
+                data: chunk.base64Wav,
+              },
+            },
+            { text: "Transcribe the spoken Turkish audio verbatim." },
+          ],
+        },
+      ],
+    });
+
+    const parts = sttRes.candidates?.[0]?.content?.parts as
+      | Array<{ text?: string; audioTranscription?: { text?: string } }>
+      | undefined;
+    const rawText =
+      parts?.[0]?.audioTranscription?.text ||
+      parts?.map((p) => p.text || "").join(" ") ||
+      sttRes.text ||
+      "";
+
+    if (rawText.trim()) {
+      const words = rawText.trim().split(/\s+/);
+      const CHUNK_WORDS = 7;
+      const phrases: string[] = [];
+      for (let w = 0; w < words.length; w += CHUNK_WORDS) {
+        const isLast = w + CHUNK_WORDS >= words.length;
+        phrases.push(
+          words.slice(w, w + CHUNK_WORDS).join(" ") + (isLast ? "" : "...")
+        );
+      }
+      const step = chunk.durationSec / Math.max(1, phrases.length);
+      return phrases.map((ph, idx) => {
+        const absSec = Math.round(chunk.startSec + idx * step);
+        return {
+          id: `tr-stt-${nowId}-${chunk.index}-${idx}`,
+          timestamp: formatSecToTimestamp(absSec),
+          seconds: absSec,
+          text: ph,
+          isImportant: false,
+          importanceType: "casual",
+        };
+      });
+    }
+  } catch {
+    // ignore
+  }
+
+  return [];
+}
+
 export interface ProcessLectureOptions {
   apiKey: string;
   model: GeminiModelId;
@@ -528,13 +791,22 @@ export interface ProcessLectureOptions {
   file?: File;
   sourceUrlOrNotes?: string;
   onProgress?: (stage: string, percent: number) => void;
+  onPartialTranscript?: (items: TranscriptItem[]) => void;
 }
 
 export async function processLectureMultimodal(
   opts: ProcessLectureOptions
 ): Promise<Omit<Lecture, "id" | "courseId" | "createdAt" | "mediaBlobKey">> {
-  const { apiKey, model, course, lectureTitle, file, sourceUrlOrNotes, onProgress } =
-    opts;
+  const {
+    apiKey,
+    model,
+    course,
+    lectureTitle,
+    file,
+    sourceUrlOrNotes,
+    onProgress,
+    onPartialTranscript,
+  } = opts;
 
   const trimmedKey = apiKey.trim();
   if (!trimmedKey) {
@@ -548,49 +820,76 @@ export async function processLectureMultimodal(
   let durationLabel = "45:00";
   let sourceType: Lecture["sourceType"] = "url";
   let mediaMimeType: string | undefined;
+  const nowId = Date.now();
+  let realAudioTranscript: TranscriptItem[] = [];
 
   if (file) {
     mediaMimeType = file.type || "video/mp4";
     sourceType = file.type.startsWith("audio") ? "audio" : "video";
-    onProgress?.("Ders videosu / ses kaydı inceleniyor...", 12);
-    durationLabel = await getMediaDurationLabel(file);
+    onProgress?.(
+      "Videonun gerçek ses kanalı çözülüyor (AudioContext PCM)...",
+      10
+    );
 
-    const INLINE_LIMIT_BYTES = 18 * 1024 * 1024; // 18 MB inline limit
-
-    if (file.size <= INLINE_LIMIT_BYTES) {
-      onProgress?.("Multimodal video ve ses verisi hazırlanıyor...", 28);
-      try {
-        const b64 = await fileToBase64(file);
-        contentParts.push({
-          inlineData: {
-            mimeType: mediaMimeType,
-            data: b64,
-          },
-        });
-      } catch {
-        // Fallback to keyframes if base64 conversion fails
-      }
-      if (sourceType === "video") {
-        const extracted = await extractVideoKeyframesFromBrowser(file, 14);
-        if (extracted.durationLabel) durationLabel = extracted.durationLabel;
-        contentParts.push(...extracted.parts);
-      }
-    } else {
-      // Large video: Dense keyframe sampling across the full duration
-      onProgress?.(
-        `Video dosyası (${(file.size / (1024 * 1024)).toFixed(1)} MB) için tahta kareleri ve zaman damgaları çıkarılıyor...`,
-        32
+    // 1. EXTRACT & TRANSCRIBE REAL AUDIO FROM VIDEO/AUDIO FILE
+    try {
+      const { chunks, totalDurationSec } = await extractWavChunksFromMediaBlob(
+        file,
+        240,
+        6000
       );
-      const extracted = await extractVideoKeyframesFromBrowser(file, 18);
-      if (extracted.durationLabel) durationLabel = extracted.durationLabel;
+      if (totalDurationSec > 0) {
+        durationLabel = formatSeconds(totalDurationSec);
+      }
+
+      const accumulated: TranscriptItem[] = [];
+      const BATCH_SIZE = 3;
+
+      for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+        const batch = chunks.slice(i, i + BATCH_SIZE);
+        const startMinLabel = formatSeconds(batch[0].startSec);
+        const endMinLabel = formatSeconds(batch[batch.length - 1].endSec);
+        const pct = Math.min(
+          75,
+          Math.round(15 + ((i + batch.length) / chunks.length) * 60)
+        );
+
+        onProgress?.(
+          `Gerçek video sesi saniye saniye yazıya dökülüyor (${startMinLabel} – ${endMinLabel} / ${durationLabel})...`,
+          pct
+        );
+
+        const batchResults = await Promise.all(
+          batch.map((c) => transcribeSingleAudioChunk(ai, c, nowId))
+        );
+
+        for (const chunkItems of batchResults) {
+          accumulated.push(...chunkItems);
+        }
+
+        const formattedSoFar = formatRealTranscriptToGoogleDriveStyle(accumulated);
+        realAudioTranscript = formattedSoFar;
+        if (formattedSoFar.length > 0) {
+          onPartialTranscript?.(formattedSoFar);
+        }
+      }
+    } catch (audioErr) {
+      console.warn("Ses kanalı ayrıştırma uyarısı:", audioErr);
+      durationLabel = await getMediaDurationLabel(file);
+    }
+
+    // 2. EXTRACT VISUAL WHITEBOARD KEYFRAMES
+    if (sourceType === "video") {
+      onProgress?.(
+        "Videodan tahta/kağıt kareleri ve formül görüntüleri çıkarılıyor...",
+        78
+      );
+      const extracted = await extractVideoKeyframesFromBrowser(file, 12);
+      if (extracted.durationLabel && durationLabel === "45:00") {
+        durationLabel = extracted.durationLabel;
+      }
       if (extracted.parts.length > 0) {
         contentParts.push(...extracted.parts);
-      } else {
-        const sliceBlob = file.slice(0, INLINE_LIMIT_BYTES, mediaMimeType);
-        const b64 = await fileToBase64(sliceBlob);
-        contentParts.push({
-          inlineData: { mimeType: mediaMimeType, data: b64 },
-        });
       }
     }
   }
@@ -601,51 +900,59 @@ export async function processLectureMultimodal(
     });
   }
 
+  if (realAudioTranscript.length > 0) {
+    const transcriptDigest = realAudioTranscript
+      .map((t) => `[${t.timestamp}] ${t.text}`)
+      .join("\n");
+    contentParts.push({
+      text: `BU VİDEONUN GERÇEK SES KAYDINDAN ÇIKARILMIŞ SANİYE SANİYE KONUŞMA DÖKÜMÜ (TRANSKRİPT):\n${transcriptDigest.slice(
+        0,
+        48000
+      )}`,
+    });
+  }
+
   onProgress?.(
-    "Gemini saniye saniye transkripti, tahta formüllerini (LaTeX) ve detaylı konu anlatımlarını çıkarıyor...",
-    65
+    "Videodaki gerçek konuşmalara göre konu anlatımları, tahta formülleri (LaTeX) ve sınav uyarıları oluşturuluyor...",
+    86
   );
 
   const systemInstruction = `Sen "Azra&Alihan Bu Okulu Bitirecek" akademik platformunun Multimodal Fizik ve Mühendislik Ders Analiz Motorusun.
 Ders: ${course.title} (${course.code})
-Müfredat Bağlamı: ${course.syllabus}
 İşlenen Kayıt Başlığı: ${lectureTitle}
 Video Süresi: ${durationLabel}
 
 GÖREVİN:
-Verilen ders videosunu, ses kaydını, tahta karelerini veya ders notunu inceleyerek TAMAMEN TÜRKÇE ve yüksek akademik doğrulukta aşağıdaki JSON nesnesini üret (kesinlikle dizi içine alma, doğrudan tek bir JSON nesnesi döndür):
-1) executiveSummary: Dersin kapsamlı yönetici özeti ve işlenen konuların detaylı akademik sentezi (formüller $...$ içinde).
-2) timeline: En az 6-8 bölümden oluşan detaylı dakika dakika konu anlatımı (timestamp "MM:SS", seconds sayısal saniye, title, summary [detaylı konu anlatımı], spokenTranscript [hocanın o bölümdeki detaylı konuşması], equations dizisi [saf LaTeX], isExamAlert boolean, varsa professorQuote).
-3) whiteboardExtractions: En az 5-6 adet tahtada/kağıtta yer alan formül ve türetiliş (timestamp, seconds, title, latex [saf LaTeX], variablesExplanation [$...$ ile değişken tanımları], diagramNote).
-4) examAlerts: En az 4-5 adet hocanın "bu kısım sınavda çıkabilir", "bunu sakın unutmayın", "vizede/finalde sorarım" dediği kritik sınav uyarısı (timestamp, seconds, severity: "critical" | "important", topic, professorQuote, examTip).
-5) conceptMap: En az 4 adet kavram haritası düğümü (concept, formula [saf LaTeX], description, connectsTo).
-6) practiceQuestions: Bu dersten sınavda çıkabilecek 3 adet çözümlü çalışma sorusu (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
-7) transcript: Google Drive video transkripti gibi saniye saniye (her 4-6 saniyede bir, 00:00'dan ${durationLabel} sonuna kadar) konuşma dökümü dizisi:
-   [
-     {
-       "timestamp": "MM:SS",
-       "seconds": sayısal saniye,
-       "text": "Hocanın ağzından çıkan 6-10 kelimelik cümle parçası",
-       "isImportant": boolean,
-       "importanceType": "exam_alert" | "formula" | "core_concept" | "casual",
-       "importanceNote": "Kısa açıklama"
-     }
-   ]
+Sana verilen gerçek video konuşma dökümünü (transkripti) ve tahta karelerini inceleyerek, SADECE bu videoda gerçekten anlatılan konulara, tanımlara ve denklemlere dayanan aşağıdaki JSON nesnesini üret:
+1) executiveSummary: Videoda anlatılanların kapsamlı özeti (formüller $...$ içinde).
+2) timeline: Videodaki konuşma akışına birebir uyan, zaman damgalı detaylı konu anlatımı bölümleri (timestamp "MM:SS", seconds sayısal saniye, title, summary [o dakikalarda hocanın anlattığı konunun detaylı anlatımı], spokenTranscript [hocanın o bölümdeki gerçek sözleri], equations dizisi [saf LaTeX], isExamAlert boolean, varsa professorQuote).
+3) whiteboardExtractions: Videoda geçen tüm formüller ve diyagramlar (timestamp, seconds, title, latex [saf LaTeX], variablesExplanation [$...$ ile değişken tanımları], diagramNote).
+4) examAlerts: Hocanın videoda vurguladığı önemli noktalar ve sınav uyarıları (timestamp, seconds, severity: "critical" | "important", topic, professorQuote, examTip).
+5) conceptMap: Videodaki kavramların haritası (concept, formula [saf LaTeX], description, connectsTo).
+6) practiceQuestions: Videoda işlenen konularla birebir ilgili 3 adet çözümlü soru (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
+${
+  realAudioTranscript.length === 0
+    ? `7) transcript: Saniye saniye konuşma dökümü dizisi [{timestamp, seconds, text, isImportant, importanceType, importanceNote}].`
+    : ""
+}
 
 ÖNEMLİ BİÇİMLENDİRME KURALI:
 Tüm LaTeX formüllerindeki ters slash (backslash) işaretlerini JSON formatında geçerli kalması için ÇİFT TERS SLASH (örnek: \\\\nabla, \\\\vec, \\\\frac, \\\\partial) olarak yaz.
 SADECE geçerli bir JSON nesnesi döndür.`;
 
   contentParts.push({
-    text: `Lütfen "${lectureTitle}" (Süre: ${durationLabel}) dersini analiz et ve tüm alanları dolu olarak istenen JSON şemasında döndür.`,
+    text: `Lütfen "${lectureTitle}" (Süre: ${durationLabel}) dersinin gerçek konuşma dökümüne ve görüntülerine göre detaylı konu anlatımlarını ve LaTeX formüllerini JSON şemasında döndür.`,
   });
 
   const modelsToTry = Array.from(
     new Set<GeminiModelId>([
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
+      "gemini-flash-lite-latest",
+      "gemini-3.1-flash-lite-preview",
       model,
       "gemini-3-flash-preview",
       "gemini-3.5-flash",
-      "gemini-3.1-flash-lite",
     ])
   );
 
@@ -660,8 +967,8 @@ SADECE geçerli bir JSON nesnesi döndür.`;
         config: {
           systemInstruction,
           responseMimeType: "application/json",
-          temperature: 0.25,
-          maxOutputTokens: 65536,
+          temperature: 0.2,
+          maxOutputTokens: 32768,
         },
       });
       if (response.text) {
@@ -674,16 +981,14 @@ SADECE geçerli bir JSON nesnesi döndür.`;
     }
   }
 
-  onProgress?.("Yapılandırılmış LaTeX ders notları ve saniye saniye transkript oluşturuluyor...", 92);
+  onProgress?.("Yapılandırılmış ders notları tamamlanıyor...", 96);
 
   const rawParsed = responseText
     ? robustJsonParse<unknown>(responseText)
     : {};
   const parsed = unwrapAndNormalizeLectureJson(rawParsed);
 
-  const nowId = Date.now();
-
-  const rawTimeline = Array.isArray(parsed.timeline)
+  let finalTimeline: Lecture["timeline"] = Array.isArray(parsed.timeline)
     ? parsed.timeline.map((t: Record<string, unknown>, i: number) => ({
         id: `seg-${nowId}-${i}`,
         timestamp: String(t.timestamp || formatSeconds(i * 300)),
@@ -697,7 +1002,36 @@ SADECE geçerli bir JSON nesnesi döndür.`;
       }))
     : [];
 
-  const rawWhiteboard = Array.isArray(parsed.whiteboardExtractions)
+  // If timeline was not returned by the summary call, build it directly from the REAL audio transcript chunks (zero fake templates!)
+  if (finalTimeline.length === 0 && realAudioTranscript.length > 0) {
+    const WINDOW_SEC = 300; // 5-minute chapters from actual spoken words
+    const maxSec = realAudioTranscript[realAudioTranscript.length - 1].seconds;
+    const numWindows = Math.max(1, Math.ceil((maxSec + 1) / WINDOW_SEC));
+    for (let w = 0; w < numWindows; w++) {
+      const wStart = w * WINDOW_SEC;
+      const wEnd = (w + 1) * WINDOW_SEC;
+      const slice = realAudioTranscript.filter(
+        (t) => t.seconds >= wStart && t.seconds < wEnd
+      );
+      if (slice.length === 0) continue;
+      const combinedSpeech = slice.map((s) => s.text.replace(/\.\.\.$/, "")).join(" ");
+      const hasImportant = slice.some((s) => s.isImportant);
+      finalTimeline.push({
+        id: `seg-real-${nowId}-${w}`,
+        timestamp: slice[0].timestamp,
+        seconds: slice[0].seconds,
+        title: `Bölüm ${w + 1} (${slice[0].timestamp} – ${
+          slice[slice.length - 1].timestamp
+        }) Konu Akışı`,
+        summary: combinedSpeech.slice(0, 420) + (combinedSpeech.length > 420 ? "..." : ""),
+        spokenTranscript: combinedSpeech,
+        equations: [],
+        isExamAlert: hasImportant,
+      });
+    }
+  }
+
+  const finalWhiteboard = Array.isArray(parsed.whiteboardExtractions)
     ? parsed.whiteboardExtractions.map(
         (w: Record<string, unknown>, i: number) => ({
           id: `wb-${nowId}-${i}`,
@@ -711,7 +1045,7 @@ SADECE geçerli bir JSON nesnesi döndür.`;
       )
     : [];
 
-  const rawAlerts = Array.isArray(parsed.examAlerts)
+  let finalAlerts: Lecture["examAlerts"] = Array.isArray(parsed.examAlerts)
     ? parsed.examAlerts.map((e: Record<string, unknown>, i: number) => ({
         id: `ea-${nowId}-${i}`,
         timestamp: String(e.timestamp || "00:00"),
@@ -719,13 +1053,28 @@ SADECE geçerli bir JSON nesnesi döndür.`;
         severity: (e.severity === "important" ? "important" : "critical") as
           | "important"
           | "critical",
-        topic: String(e.topic || "Sınav Vurgusu"),
+        topic: String(e.topic || "Hoca Vurgusu"),
         professorQuote: String(e.professorQuote || ""),
         examTip: String(e.examTip || ""),
       }))
     : [];
 
-  const rawConcepts = Array.isArray(parsed.conceptMap)
+  if (finalAlerts.length === 0 && realAudioTranscript.length > 0) {
+    finalAlerts = realAudioTranscript
+      .filter((t) => t.isImportant)
+      .slice(0, 6)
+      .map((t, i) => ({
+        id: `ea-real-${nowId}-${i}`,
+        timestamp: t.timestamp,
+        seconds: t.seconds,
+        severity: t.importanceType === "exam_alert" ? "critical" : "important",
+        topic: t.importanceNote || "Ders Vurgusu",
+        professorQuote: t.text,
+        examTip: "Videonun bu saniyesindeki açıklamayı dikkatle tekrar izleyin.",
+      }));
+  }
+
+  const finalConcepts = Array.isArray(parsed.conceptMap)
     ? parsed.conceptMap.map((c: Record<string, unknown>, i: number) => ({
         id: `cm-${nowId}-${i}`,
         concept: String(c.concept || ""),
@@ -735,7 +1084,7 @@ SADECE geçerli bir JSON nesnesi döndür.`;
       }))
     : [];
 
-  const rawQuestions = Array.isArray(parsed.practiceQuestions)
+  const finalQuestions = Array.isArray(parsed.practiceQuestions)
     ? parsed.practiceQuestions.map(
         (q: Record<string, unknown>, i: number) => ({
           id: `pq-${nowId}-${i}`,
@@ -751,10 +1100,14 @@ SADECE geçerli bir JSON nesnesi döndür.`;
       )
     : [];
 
-  let rawTranscript: TranscriptItem[] = [];
-  if (Array.isArray(parsed.transcript) && parsed.transcript.length > 0) {
-    rawTranscript = (parsed.transcript as Array<Record<string, unknown>>).map(
-      (tr, i) => {
+  let finalTranscript: TranscriptItem[] = realAudioTranscript;
+  if (
+    finalTranscript.length === 0 &&
+    Array.isArray(parsed.transcript) &&
+    parsed.transcript.length > 0
+  ) {
+    finalTranscript = formatRealTranscriptToGoogleDriveStyle(
+      (parsed.transcript as Array<Record<string, unknown>>).map((tr, i) => {
         const isImportant =
           Boolean(tr.isImportant) ||
           Boolean(tr.isProfessorHighlight) ||
@@ -777,14 +1130,28 @@ SADECE geçerli bir JSON nesnesi döndür.`;
             : undefined,
           isProfessorHighlight: isImportant,
         };
-      }
+      })
     );
   }
 
-  const draftLecture: Lecture = {
-    id: `temp-${nowId}`,
-    courseId: course.id,
-    createdAt: new Date().toISOString(),
+  const synthesizedSummary =
+    typeof parsed.executiveSummary === "string" &&
+    parsed.executiveSummary.trim()
+      ? parsed.executiveSummary
+      : realAudioTranscript.length > 0
+      ? realAudioTranscript
+          .slice(0, 18)
+          .map((t) => t.text.replace(/\.\.\.$/, ""))
+          .join(" ")
+      : `${lectureTitle} dersi işlendi.`;
+
+  if (!responseText && realAudioTranscript.length === 0 && lastErr) {
+    throw new Error(
+      `Ders analizi oluşturulamadı: ${extractCleanErrorMessage(lastErr)}`
+    );
+  }
+
+  return {
     title: lectureTitle,
     recordedDate: new Date().toLocaleDateString("tr-TR", {
       day: "numeric",
@@ -798,48 +1165,14 @@ SADECE geçerli bir JSON nesnesi döndür.`;
         : undefined,
     mediaMimeType,
     durationLabel,
-    executiveSummary:
-      typeof parsed.executiveSummary === "string" &&
-      parsed.executiveSummary.trim()
-        ? parsed.executiveSummary
-        : EMT_LECTURE_3_SON_40_TEMPLATE.executiveSummary,
-    timeline: rawTimeline,
-    whiteboardExtractions: rawWhiteboard,
-    examAlerts: rawAlerts,
-    conceptMap: rawConcepts,
-    practiceQuestions: rawQuestions,
-    transcript: rawTranscript,
-  };
-
-  // Guarantee non-empty sections and dense 4-5s second-by-second transcript
-  const { lecture: guaranteed } = repairLectureIfNeeded(draftLecture);
-  const denseTranscript = ensureDenseSecondBySecondTranscript(
-    guaranteed.transcript,
-    guaranteed.timeline,
-    guaranteed.executiveSummary,
-    guaranteed.durationLabel
-  );
-
-  if (!responseText && lastErr && guaranteed.timeline.length === 0) {
-    throw new Error(
-      `Ders analizi oluşturulamadı: ${extractCleanErrorMessage(lastErr)}`
-    );
-  }
-
-  return {
-    title: guaranteed.title,
-    recordedDate: guaranteed.recordedDate,
-    sourceType: guaranteed.sourceType,
-    mediaUrl: guaranteed.mediaUrl,
-    mediaMimeType: guaranteed.mediaMimeType,
-    durationLabel: guaranteed.durationLabel,
-    executiveSummary: guaranteed.executiveSummary,
-    timeline: guaranteed.timeline,
-    whiteboardExtractions: guaranteed.whiteboardExtractions,
-    examAlerts: guaranteed.examAlerts,
-    conceptMap: guaranteed.conceptMap,
-    practiceQuestions: guaranteed.practiceQuestions,
-    transcript: denseTranscript,
+    executiveSummary: synthesizedSummary,
+    timeline: finalTimeline,
+    whiteboardExtractions: finalWhiteboard,
+    examAlerts: finalAlerts,
+    conceptMap: finalConcepts,
+    practiceQuestions: finalQuestions,
+    transcript: finalTranscript,
+    isRealAudioTranscript: realAudioTranscript.length > 0,
   };
 }
 
@@ -938,10 +1271,13 @@ KESİN PEDAGOJİK VE AKADEMİK KURALLARIN:
 
   const modelsToTry = Array.from(
     new Set<GeminiModelId>([
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
+      "gemini-flash-lite-latest",
+      "gemini-3.1-flash-lite-preview",
       model,
       "gemini-3-flash-preview",
       "gemini-3.5-flash",
-      "gemini-3.1-flash-lite",
     ])
   );
 

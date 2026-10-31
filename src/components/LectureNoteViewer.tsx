@@ -33,7 +33,7 @@ import { LatexFormula, MathMarkdown } from "@/components/MathMarkdown";
 import { loadMediaBlob, loadMediaObjectUrl, saveMediaBlob } from "@/lib/mediaDb";
 import { processLectureMultimodal } from "@/lib/gemini/client";
 import {
-  ensureDenseSecondBySecondTranscript,
+  formatRealTranscriptToGoogleDriveStyle,
   repairLectureIfNeeded,
 } from "@/lib/emtLectureData";
 
@@ -89,6 +89,11 @@ export function LectureNoteViewer({
   const [autoScrollTranscript, setAutoScrollTranscript] = useState<boolean>(true);
   const [reprocessing, setReprocessing] = useState<boolean>(false);
   const [reprocessStage, setReprocessStage] = useState<string>("");
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const [livePartialTranscript, setLivePartialTranscript] = useState<
+    TranscriptItem[] | null
+  >(null);
+  const autoTranscribedIdsRef = useRef<Set<string>>(new Set());
   const [openTranscripts, setOpenTranscripts] = useState<Record<string, boolean>>(
     {}
   );
@@ -128,14 +133,19 @@ export function LectureNoteViewer({
   }, [activeLecture]);
 
   const transcriptItems: TranscriptItem[] = React.useMemo(() => {
+    if (
+      reprocessing &&
+      livePartialTranscript &&
+      livePartialTranscript.length > 0
+    ) {
+      return livePartialTranscript;
+    }
     if (!activeLecture) return [];
-    return ensureDenseSecondBySecondTranscript(
-      activeLecture.transcript,
-      activeLecture.timeline,
-      activeLecture.executiveSummary,
-      activeLecture.durationLabel
-    );
-  }, [activeLecture]);
+    if (activeLecture.transcript && activeLecture.transcript.length > 0) {
+      return formatRealTranscriptToGoogleDriveStyle(activeLecture.transcript);
+    }
+    return [];
+  }, [activeLecture, reprocessing, livePartialTranscript]);
 
   const activeTranscriptIndex = React.useMemo(() => {
     if (!transcriptItems || transcriptItems.length === 0) return -1;
@@ -169,7 +179,9 @@ export function LectureNoteViewer({
   const handleReanalyzeCurrentVideo = async (overrideFile?: File) => {
     if (!activeLecture || reprocessing) return;
     setReprocessing(true);
-    setReprocessStage("Video ve ses verisi hazırlanıyor...");
+    setReprocessError(null);
+    setLivePartialTranscript(null);
+    setReprocessStage("Videonun gerçek ses kanalı ve kareleri hazırlanıyor...");
     try {
       let fileToAnalyze = overrideFile;
       if (!fileToAnalyze && activeLecture.mediaBlobKey) {
@@ -186,28 +198,50 @@ export function LectureNoteViewer({
       if (apiKeys?.geminiApiKey) {
         const result = await processLectureMultimodal({
           apiKey: apiKeys.geminiApiKey,
-          model: apiKeys.geminiModel || "gemini-3-flash-preview",
+          model: apiKeys.geminiModel || "gemini-3.5-flash-lite",
           course,
           lectureTitle: activeLecture.title,
           file: fileToAnalyze,
           onProgress: (stage) => setReprocessStage(stage),
+          onPartialTranscript: (items) => setLivePartialTranscript(items),
         });
         onUpdateLecture?.({
           ...activeLecture,
           ...result,
+          isRealAudioTranscript: true,
         });
-      } else {
-        const { lecture: repaired } = repairLectureIfNeeded(activeLecture);
-        onUpdateLecture?.(repaired);
       }
-    } catch {
-      const { lecture: repaired } = repairLectureIfNeeded(activeLecture);
-      onUpdateLecture?.(repaired);
+    } catch (err) {
+      setReprocessError(
+        err instanceof Error
+          ? err.message
+          : "Video ses analizi sırasında bir hata oluştu."
+      );
     } finally {
       setReprocessing(false);
       setReprocessStage("");
+      setLivePartialTranscript(null);
     }
   };
+
+  // Automatically extract and transcribe the REAL audio of any uploaded video stored in IndexedDB that hasn't been audio-transcribed yet
+  useEffect(() => {
+    if (
+      !activeLecture ||
+      !activeLecture.mediaBlobKey ||
+      activeLecture.isRealAudioTranscript ||
+      reprocessing ||
+      !apiKeys?.geminiApiKey
+    ) {
+      return;
+    }
+    if (autoTranscribedIdsRef.current.has(activeLecture.id)) {
+      return;
+    }
+    autoTranscribedIdsRef.current.add(activeLecture.id);
+    handleReanalyzeCurrentVideo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeLecture?.id, activeLecture?.mediaBlobKey, activeLecture?.isRealAudioTranscript, apiKeys?.geminiApiKey]);
 
   const importantTranscriptCount = React.useMemo(() => {
     return transcriptItems.filter((t) => t.isImportant).length;
@@ -732,8 +766,25 @@ export function LectureNoteViewer({
                 className="flex-1 overflow-y-auto max-h-[440px] p-2 space-y-1 text-xs divide-y divide-zinc-900"
               >
                 {filteredTranscript.length === 0 ? (
-                  <div className="py-12 text-center text-zinc-500 text-xs">
-                    Aranan kritere uygun konuşma bulunamadı.
+                  <div className="py-12 px-4 text-center text-zinc-400 text-xs space-y-2">
+                    {reprocessing ? (
+                      <>
+                        <Loader2 className="mx-auto h-5 w-5 animate-spin text-amber-400" />
+                        <div className="font-semibold text-amber-300">
+                          Videonun gerçek sesi saniye saniye çözümleniyor...
+                        </div>
+                        <div className="text-[11px] text-zinc-500">
+                          {reprocessStage ||
+                            "Her 4 dakikalık ses bloğu tamamlandığında cümleler anında burada belirecek."}
+                        </div>
+                      </>
+                    ) : reprocessError ? (
+                      <div className="text-red-400">{reprocessError}</div>
+                    ) : (
+                      <div className="text-zinc-500">
+                        Aranan kritere uygun konuşma bulunamadı.
+                      </div>
+                    )}
                   </div>
                 ) : (
                   filteredTranscript.map((item, index) => {

@@ -18,7 +18,7 @@ export const BUILTIN_GEMINI_KEY = getBuiltinKey();
 
 const DEFAULT_KEYS: ApiKeysConfig = {
   geminiApiKey: BUILTIN_GEMINI_KEY,
-  geminiModel: "gemini-3-flash-preview",
+  geminiModel: "gemini-3.5-flash-lite",
   supabaseUrl: "",
   supabaseAnonKey: "",
   wolframAppId: "",
@@ -29,9 +29,10 @@ function sanitizeModel(model: string | undefined): GeminiModelId {
     !model ||
     model.includes("2.5") ||
     model.includes("2.0") ||
-    model.includes("1.5")
+    model.includes("1.5") ||
+    model === "gemini-3-flash-preview"
   ) {
-    return "gemini-3-flash-preview";
+    return "gemini-3.5-flash-lite";
   }
   return model as GeminiModelId;
 }
