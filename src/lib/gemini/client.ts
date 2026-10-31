@@ -12,8 +12,8 @@ import {
   formatSecToTimestamp,
 } from "@/lib/emtLectureData";
 import {
+  anchorSubPartItemsToVoiceOnset,
   extractWavChunksFromMediaBlob,
-  verifyAndCalibrateBlockWith4Checkpoints,
   WavChunk,
 } from "@/lib/audioExtractor";
 
@@ -659,40 +659,76 @@ async function transcribeSingleAudioChunk(
   chunk: WavChunk,
   nowId: number
 ): Promise<TranscriptItem[]> {
-  const burstsText =
-    chunk.speechBursts && chunk.speechBursts.length > 0
-      ? chunk.speechBursts
-          .map((b) => `${b.startRelSec}s-${b.endRelSec}s`)
-          .join(", ")
-      : `0s-${chunk.durationSec}s`;
-  const [cp0, cp1, cp2, cp3] = chunk.acousticCheckpoints || [
-    0,
-    Math.floor(chunk.durationSec * 0.33),
-    Math.floor(chunk.durationSec * 0.66),
-    chunk.durationSec - 1,
-  ];
+  const subParts =
+    chunk.subParts && chunk.subParts.length > 0
+      ? chunk.subParts
+      : [
+          {
+            partNumber: 1,
+            startSec: chunk.startSec,
+            endSec: chunk.endSec,
+            durationSec: chunk.durationSec,
+            base64Wav: chunk.base64Wav,
+            firstVoiceRelSec: 0,
+            lastVoiceRelSec: Math.max(0, chunk.durationSec - 1),
+            voicedRelSeconds: [],
+            speechBursts: [],
+          },
+        ];
 
-  const prompt = `Bu ${chunk.durationSec} saniyelik (1 dakikalık) gerçek ders ses kaydını dikkatle dinle.
-FİZİKSEL SES DALGASI (AKUSTİK) BİLGİSİ:
-- Bu 1 dakikalık ses bloğunda hocanın aktif konuştuğu saniye aralıkları: [${burstsText}]
-- Blok içindeki 4 akustik referans noktası: [Başlangıç: ${cp0}. sn, 2. Nokta: ${cp1}. sn, 3. Nokta: ${cp2}. sn, Bitiş: ${cp3}. sn]
+  const multiParts: Part[] = [];
+  for (const sp of subParts) {
+    const startLabel = formatSecToTimestamp(sp.startSec);
+    const endLabel = formatSecToTimestamp(sp.endSec);
+    const burstsLabel =
+      sp.speechBursts && sp.speechBursts.length > 0
+        ? sp.speechBursts
+            .map((b) => `${b.startRelSec}s-${b.endRelSec}s`)
+            .join(", ")
+        : `0s-${sp.durationSec}s`;
 
+    multiParts.push({
+      text: `=== BÖLÜM (part): ${sp.partNumber} | VİDEO DAKİKASI: ${startLabel} – ${endLabel} (60 sn) | Bu 60 saniyelik ses kaydında konuşma duyulan saniyeler: [${burstsLabel}] (İlk konuşma başlangıcı: ${sp.firstVoiceRelSec}. sn, Son konuşma: ${sp.lastVoiceRelSec}. sn) ===`,
+    });
+    multiParts.push({
+      inlineData: {
+        mimeType: "audio/wav",
+        data: sp.base64Wav,
+      },
+    });
+  }
+
+  const prompt = `Yukarıda 4 dakikalık (${formatSecToTimestamp(
+    chunk.startSec
+  )} – ${formatSecToTimestamp(
+    chunk.endSec
+  )}) ders kaydı, zaman kaymasını sıfırlamak için ${
+    subParts.length
+  } adet ardışık 60 saniyelik ses parçası (part: 1 .. ${
+    subParts.length
+  }) halinde verilmiştir.
 GÖREVİN:
-Ses kaydında hocanın ağzından çıkan GERÇEK SÖZLERİ BİREBİR (kelimesi kelimesine, hiçbir şeyi özetlemeden ve uydurmadan) Google Drive video transkripti gibi her 4-5 saniyede bir zaman damgalı alt yazı satırları olarak JSON dizisi halinde döndür.
+Her ses parçasında (part: 1..${
+    subParts.length
+  }) hocanın ağzından çıkan GERÇEK SÖZLERİ BİREBİR (kelimesi kelimesine, hiçbir şeyi özetlemeden ve uydurmadan) Google Drive video transkripti gibi her 4-5 saniyede bir zaman damgalı alt yazı satırları olarak JSON dizisi halinde döndür.
 KESİN KURALLAR:
 1. SADECE ses kaydında gerçekten duyduğun sözleri yaz. Asla ses kaydında olmayan bir cümle uydurma!
-2. "sec" alanı bu 1 dakikalık ses kaydının başından (0. saniyeden) itibaren geçen TAM SAYI saniyedir (0 ile ${chunk.durationSec - 1} arasında tam sayı, örnek: 0, 3, 8, 14, 22, 35, 48, 56). Sessiz saniyelere cümle koyma, konuşmanın gerçekten duyulduğu saniyeyi yaz.
-3. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
+2. "part" alanı sözün duyulduğu ses parçasının numarasıdır (1, 2, 3 veya 4).
+3. "sec" alanı o 60 saniyelik ses parçasının kendi içindeki saniyesidir (0 ile 59 arasında TAM SAYI, örn: 0, 2, 7, 14, 25, 38, 52). Örneğin Bölüm 2'nin 2. saniyesinde başlayan bir cümle için "part": 2, "sec": 2 yaz! Sessiz saniyelere cümle koyma, her parçanın başında verilen İlk konuşma başlangıcı saniyesine dikkat et.
+4. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
 JSON Dizisi Şeması:
 [
   {
-    "sec": ${cp0},
+    "part": 1,
+    "sec": ${subParts[0]?.firstVoiceRelSec ?? 0},
     "text": "Ses kaydında duyulan birebir gerçek sözler...",
     "isImportant": false,
     "importanceType": "casual" | "exam_alert" | "formula" | "core_concept",
     "importanceNote": "Önemliyse kısa etiket"
   }
 ]`;
+
+  multiParts.push({ text: prompt });
 
   // Rotate primary worker model by chunk index to distribute rate limits
   const orderedModels = [
@@ -709,15 +745,7 @@ JSON Dizisi Şeması:
         contents: [
           {
             role: "user",
-            parts: [
-              {
-                inlineData: {
-                  mimeType: "audio/wav",
-                  data: chunk.base64Wav,
-                },
-              },
-              { text: prompt },
-            ],
+            parts: multiParts,
           },
         ],
         config: {
@@ -746,75 +774,112 @@ JSON Dizisi Şeması:
             .map((it) => Number(it.sec ?? it.seconds ?? it.offsetSec))
             .filter((n) => Number.isFinite(n));
 
-          const rawChunkItems: TranscriptItem[] = arr
-            .map((item, idx) => {
-              const rawSec =
-                item.time ??
-                item.timestamp ??
-                item.sec ??
-                item.seconds ??
-                item.offsetSec;
-              const absSec = parseRelativeSecFromChunkItem(
+          // Group items by their 60s subPart (1..4) and anchor each minute gently to its physical voice onset
+          const byPart = new Map<number, TranscriptItem[]>();
+          for (const sp of subParts) {
+            byPart.set(sp.partNumber, []);
+          }
+
+          arr.forEach((item, idx) => {
+            const text = String(item.text || "").trim();
+            if (text.length <= 1) return;
+
+            const rawPart = Number(item.part);
+            const rawSec =
+              item.sec ??
+              item.seconds ??
+              item.offsetSec ??
+              item.time ??
+              item.timestamp;
+
+            let targetSubPart = subParts.find((sp) => sp.partNumber === rawPart);
+            let absSec: number;
+
+            if (
+              targetSubPart &&
+              typeof rawSec === "number" &&
+              Number.isFinite(rawSec) &&
+              rawSec >= 0 &&
+              rawSec < 65
+            ) {
+              absSec =
+                targetSubPart.startSec +
+                Math.max(
+                  0,
+                  Math.min(targetSubPart.durationSec - 1, Math.round(rawSec))
+                );
+            } else {
+              absSec = parseRelativeSecFromChunkItem(
                 rawSec,
                 chunk,
                 idx,
                 arr.length,
                 allRawNums
               );
-              const text = String(item.text || "").trim();
-              const lower = text.toLowerCase();
-              const isImportant =
-                Boolean(item.isImportant) ||
-                lower.includes("sınav") ||
-                lower.includes("vize") ||
-                lower.includes("final") ||
-                lower.includes("dikkat") ||
-                lower.includes("unutmayın") ||
-                lower.includes("eşittir");
-              const importanceType: TranscriptItem["importanceType"] =
-                (item.importanceType as TranscriptItem["importanceType"]) ||
-                (lower.includes("sınav") ||
-                lower.includes("vize") ||
-                lower.includes("unutmayın")
-                  ? "exam_alert"
-                  : lower.includes("eşittir") ||
-                    lower.includes("integral") ||
-                    lower.includes("grad")
-                  ? "formula"
-                  : isImportant
-                  ? "core_concept"
-                  : "casual");
+              targetSubPart =
+                subParts.find(
+                  (sp) => absSec >= sp.startSec && absSec < sp.endSec
+                ) || subParts[subParts.length - 1];
+            }
 
-              return {
-                id: `tr-60s-${nowId}-${chunk.index}-${idx}`,
-                timestamp: formatSecToTimestamp(absSec),
-                seconds: absSec,
-                text,
-                isImportant,
-                importanceType,
-                importanceNote: item.importanceNote
-                  ? String(item.importanceNote)
-                  : isImportant
-                  ? importanceType === "exam_alert"
-                    ? "🔥 Sınav Vurgusu"
-                    : importanceType === "formula"
-                    ? "📐 Formül Anlatımı"
-                    : "💡 Önemli Nokta"
-                  : undefined,
-                isProfessorHighlight: isImportant,
-              };
-            })
-            .filter((t) => t.text.length > 1);
+            const lower = text.toLowerCase();
+            const isImportant =
+              Boolean(item.isImportant) ||
+              lower.includes("sınav") ||
+              lower.includes("vize") ||
+              lower.includes("final") ||
+              lower.includes("dikkat") ||
+              lower.includes("unutmayın") ||
+              lower.includes("eşittir");
+            const importanceType: TranscriptItem["importanceType"] =
+              (item.importanceType as TranscriptItem["importanceType"]) ||
+              (lower.includes("sınav") ||
+              lower.includes("vize") ||
+              lower.includes("unutmayın")
+                ? "exam_alert"
+                : lower.includes("eşittir") ||
+                  lower.includes("integral") ||
+                  lower.includes("grad")
+                ? "formula"
+                : isImportant
+                ? "core_concept"
+                : "casual");
 
-          // 4-Point Checkpoint Verification inside this 1-minute block before moving on
-          const { items: verifiedBlockItems } =
-            verifyAndCalibrateBlockWith4Checkpoints(
-              rawChunkItems,
-              chunk.startSec,
-              chunk.durationSec,
-              chunk.voicedRelSeconds
-            );
-          return verifiedBlockItems;
+            const trItem: TranscriptItem = {
+              id: `tr-4m-${nowId}-${chunk.index}-${idx}`,
+              timestamp: formatSecToTimestamp(absSec),
+              seconds: absSec,
+              text,
+              isImportant,
+              importanceType,
+              importanceNote: item.importanceNote
+                ? String(item.importanceNote)
+                : isImportant
+                ? importanceType === "exam_alert"
+                  ? "🔥 Sınav Vurgusu"
+                  : importanceType === "formula"
+                  ? "📐 Formül Anlatımı"
+                  : "💡 Önemli Nokta"
+                : undefined,
+              isProfessorHighlight: isImportant,
+            };
+
+            const list = byPart.get(targetSubPart.partNumber) || [];
+            list.push(trItem);
+            byPart.set(targetSubPart.partNumber, list);
+          });
+
+          const finalChunkItems: TranscriptItem[] = [];
+          for (const sp of subParts) {
+            const partItems = byPart.get(sp.partNumber) || [];
+            if (partItems.length === 0) continue;
+            const anchored = anchorSubPartItemsToVoiceOnset(partItems, sp);
+            finalChunkItems.push(...anchored);
+          }
+
+          if (finalChunkItems.length > 0) {
+            return finalChunkItems;
+          }
         }
       }
     } catch {
@@ -929,11 +994,11 @@ export async function processLectureMultimodal(
       10
     );
 
-    // 1. EXTRACT & TRANSCRIBE REAL AUDIO FROM VIDEO/AUDIO FILE (1-MINUTE BLOCKS + 4-POINT CHECKPOINT VERIFICATION)
+    // 1. EXTRACT & TRANSCRIBE REAL AUDIO FROM VIDEO/AUDIO FILE (4-MINUTE PACKAGES WITH 4 INTERNAL 60s ACOUSTIC ANCHORS)
     try {
       const { chunks, totalDurationSec } = await extractWavChunksFromMediaBlob(
         file,
-        60,
+        240,
         6000
       );
       if (totalDurationSec > 0) {
@@ -941,7 +1006,7 @@ export async function processLectureMultimodal(
       }
 
       const accumulated: TranscriptItem[] = [];
-      const BATCH_SIZE = 4;
+      const BATCH_SIZE = 2;
 
       for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
         const batch = chunks.slice(i, i + BATCH_SIZE);

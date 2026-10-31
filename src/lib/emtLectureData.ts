@@ -47,7 +47,7 @@ export function formatRealTranscriptToGoogleDriveStyle(
       i + 1 < sorted.length
         ? Math.max(item.seconds + 3, sorted[i + 1].seconds)
         : item.seconds + 6;
-    const gap = Math.min(14, Math.max(3, nextSec - item.seconds));
+    const gap = Math.min(12, Math.max(3, nextSec - item.seconds));
     const words = item.text.trim().split(/\s+/);
     const CHUNK_WORDS = 7;
 
@@ -65,9 +65,7 @@ export function formatRealTranscriptToGoogleDriveStyle(
         const isLast = cIdx === chunks.length - 1;
         expanded.push({
           ...item,
-          id: item.id?.includes("-60s-")
-            ? `tr-60s-${s}-${counter++}`
-            : `tr-real-${s}-${counter++}`,
+          id: `tr-4m-${s}-${counter++}`,
           timestamp: formatSecToTimestamp(s),
           seconds: s,
           text: chunkText,
@@ -79,7 +77,9 @@ export function formatRealTranscriptToGoogleDriveStyle(
     } else {
       expanded.push({
         ...item,
-        id: item.id || `tr-60s-${item.seconds}-${counter++}`,
+        id: item.id?.startsWith("tr-4m-")
+          ? item.id
+          : `tr-4m-${item.seconds}-${counter++}`,
         timestamp: formatSecToTimestamp(item.seconds),
       });
     }
@@ -89,29 +89,27 @@ export function formatRealTranscriptToGoogleDriveStyle(
 }
 
 /**
- * Does NOT overwrite lectures with any fake template.
- * Clears out any old static template on user-uploaded videos.
+ * Clears out any old static template OR old 1-minute (`tr-60s-` / `tr-real-`) shifted transcripts
+ * on user-uploaded videos so LectureNoteViewer automatically runs the new
+ * 4-Minute Package + 4 Internal 60s Acoustic Sub-Anchor engine (`tr-4m-`).
  */
 export function repairLectureIfNeeded(lec: Lecture): {
   lecture: Lecture;
   repaired: boolean;
 } {
-  if (lec.mediaBlobKey && !lec.isRealAudioTranscript) {
-    const hasOldStaticTemplate =
-      lec.transcript?.some((t) => t.id.startsWith("tr-emt40-")) ||
-      lec.timeline?.some((s) => s.id.startsWith("seg-emt40-"));
+  if (lec.mediaBlobKey) {
+    const hasNewFourMinMultiAnchor =
+      lec.isRealAudioTranscript &&
+      lec.transcript &&
+      lec.transcript.length > 0 &&
+      lec.transcript.every((t) => t.id.startsWith("tr-4m-"));
 
-    if (hasOldStaticTemplate) {
+    if (!hasNewFourMinMultiAnchor) {
       return {
         repaired: true,
         lecture: {
           ...lec,
           transcript: [],
-          timeline: [],
-          whiteboardExtractions: [],
-          examAlerts: [],
-          conceptMap: [],
-          practiceQuestions: [],
           isRealAudioTranscript: false,
         },
       };

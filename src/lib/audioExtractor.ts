@@ -6,18 +6,25 @@ export interface SpeechBurst {
   endRelSec: number;
 }
 
+export interface WavSubPart {
+  partNumber: number; // 1, 2, 3, or 4 within the 4-minute package
+  startSec: number; // Absolute second in video (e.g. 0, 60, 120, 180)
+  endSec: number;
+  durationSec: number; // Up to 60s
+  base64Wav: string;
+  firstVoiceRelSec: number;
+  lastVoiceRelSec: number;
+  voicedRelSeconds: number[];
+  speechBursts: SpeechBurst[];
+}
+
 export interface WavChunk {
   index: number;
   startSec: number;
   endSec: number;
-  durationSec: number;
+  durationSec: number; // 240s (4 minutes)
   base64Wav: string;
-  /** Relative seconds (0..durationSec-1) where voice energy is above noise floor */
-  voicedRelSeconds: number[];
-  /** Contiguous speech intervals inside this chunk */
-  speechBursts: SpeechBurst[];
-  /** 4 physical acoustic checkpoints [start, 33%, 66%, end] in relative seconds */
-  acousticCheckpoints: [number, number, number, number];
+  subParts: WavSubPart[];
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
@@ -69,18 +76,15 @@ function encodeMonoPcm16ToWavBase64(
   return uint8ToBase64(new Uint8Array(buffer));
 }
 
-/**
- * Analyzes a mono PCM slice to find which seconds contain actual spoken voice
- * and computes 4 physical acoustic checkpoints [0%, 33%, 66%, 95%].
- */
 function analyzeSliceVoiceActivity(
   slice: Float32Array,
   sampleRate: number,
   durationSec: number
 ): {
+  firstVoiceRelSec: number;
+  lastVoiceRelSec: number;
   voicedRelSeconds: number[];
   speechBursts: SpeechBurst[];
-  acousticCheckpoints: [number, number, number, number];
 } {
   const rmsBySec: number[] = [];
   for (let s = 0; s < durationSec; s++) {
@@ -98,9 +102,9 @@ function analyzeSliceVoiceActivity(
   }
 
   const sortedRms = [...rmsBySec].sort((a, b) => a - b);
-  const p20 = sortedRms[Math.floor(sortedRms.length * 0.2)] || 0;
+  const p15 = sortedRms[Math.floor(sortedRms.length * 0.15)] || 0;
   const p85 = sortedRms[Math.floor(sortedRms.length * 0.85)] || 0.01;
-  const threshold = Math.max(0.003, p20 + (p85 - p20) * 0.18);
+  const threshold = Math.max(0.0025, p15 + (p85 - p15) * 0.16);
 
   const voicedRelSeconds: number[] = [];
   for (let s = 0; s < durationSec; s++) {
@@ -109,7 +113,6 @@ function analyzeSliceVoiceActivity(
     }
   }
 
-  // Fallback if audio is very quiet/uniform
   if (voicedRelSeconds.length === 0) {
     for (let s = 0; s < durationSec; s++) {
       voicedRelSeconds.push(s);
@@ -129,22 +132,14 @@ function analyzeSliceVoiceActivity(
   }
   speechBursts.push({ startRelSec: burstStart, endRelSec: prev + 1 });
 
-  const pickQuantile = (q: number) =>
-    voicedRelSeconds[
-      Math.min(
-        voicedRelSeconds.length - 1,
-        Math.max(0, Math.floor((voicedRelSeconds.length - 1) * q))
-      )
-    ];
-
-  const acousticCheckpoints: [number, number, number, number] = [
-    pickQuantile(0),
-    pickQuantile(0.33),
-    pickQuantile(0.66),
-    pickQuantile(0.95),
-  ];
-
-  return { voicedRelSeconds, speechBursts, acousticCheckpoints };
+  return {
+    firstVoiceRelSec: voicedRelSeconds[0] ?? 0,
+    lastVoiceRelSec:
+      voicedRelSeconds[voicedRelSeconds.length - 1] ??
+      Math.max(0, durationSec - 1),
+    voicedRelSeconds,
+    speechBursts,
+  };
 }
 
 async function decodeMediaBlobToMonoPcm(
@@ -213,13 +208,15 @@ async function decodeMediaBlobToMonoPcm(
 }
 
 /**
- * Decodes the real audio track of ANY video/audio Blob or File in the browser,
- * downsamples to 6000 Hz mono 16-bit PCM WAV, and slices into 1-minute (60s) chunks
- * with 4-point acoustic voice activity checkpoints.
+ * Slices the decoded video audio into 4-minute (240s) packages.
+ * Each 4-minute package also contains 4 internal 60-second WavSubParts
+ * with physical PCM voice onset/offset metadata so Gemini processes
+ * 4 minutes at a time (never hitting rate limits) while every 60-second
+ * minute boundary is hardware-locked to the exact second!
  */
 export async function extractWavChunksFromMediaBlob(
   blob: Blob,
-  chunkDurationSec = 60,
+  chunkDurationSec = 240,
   targetSampleRate = 6000
 ): Promise<{ chunks: WavChunk[]; totalDurationSec: number }> {
   const { monoSamples, totalDurationSec } = await decodeMediaBlobToMonoPcm(
@@ -227,38 +224,72 @@ export async function extractWavChunksFromMediaBlob(
     targetSampleRate
   );
 
-  const samplesPerChunk = chunkDurationSec * targetSampleRate;
-  const totalChunks = Math.max(
+  const pkgSec = Math.max(60, chunkDurationSec);
+  const samplesPerPkg = pkgSec * targetSampleRate;
+  const totalPackages = Math.max(
     1,
-    Math.ceil(monoSamples.length / samplesPerChunk)
+    Math.ceil(monoSamples.length / samplesPerPkg)
   );
   const chunks: WavChunk[] = [];
 
-  for (let idx = 0; idx < totalChunks; idx++) {
-    const startSample = idx * samplesPerChunk;
-    const endSample = Math.min(
+  for (let idx = 0; idx < totalPackages; idx++) {
+    const pkgStartSample = idx * samplesPerPkg;
+    const pkgEndSample = Math.min(
       monoSamples.length,
-      (idx + 1) * samplesPerChunk
+      (idx + 1) * samplesPerPkg
     );
-    if (endSample <= startSample) continue;
+    if (pkgEndSample <= pkgStartSample) continue;
 
-    const slice = monoSamples.subarray(startSample, endSample);
-    const startSec = Math.round(startSample / targetSampleRate);
-    const endSec = Math.round(endSample / targetSampleRate);
-    const durationSec = Math.max(1, endSec - startSec);
+    const pkgSlice = monoSamples.subarray(pkgStartSample, pkgEndSample);
+    const pkgStartSec = Math.round(pkgStartSample / targetSampleRate);
+    const pkgEndSec = Math.round(pkgEndSample / targetSampleRate);
+    const pkgDurationSec = Math.max(1, pkgEndSec - pkgStartSec);
 
-    const { voicedRelSeconds, speechBursts, acousticCheckpoints } =
-      analyzeSliceVoiceActivity(slice, targetSampleRate, durationSec);
+    // Build up to 4 internal 60-second sub-parts inside this 4-minute package
+    const subParts: WavSubPart[] = [];
+    const subSec = 60;
+    const samplesPerSub = subSec * targetSampleRate;
+    const numSubs = Math.max(1, Math.ceil(pkgSlice.length / samplesPerSub));
+
+    for (let s = 0; s < numSubs; s++) {
+      const subStartSample = s * samplesPerSub;
+      const subEndSample = Math.min(pkgSlice.length, (s + 1) * samplesPerSub);
+      if (subEndSample <= subStartSample) continue;
+
+      const subSlice = pkgSlice.subarray(subStartSample, subEndSample);
+      const absStartSec =
+        pkgStartSec + Math.round(subStartSample / targetSampleRate);
+      const absEndSec =
+        pkgStartSec + Math.round(subEndSample / targetSampleRate);
+      const subDurSec = Math.max(1, absEndSec - absStartSec);
+
+      const {
+        firstVoiceRelSec,
+        lastVoiceRelSec,
+        voicedRelSeconds,
+        speechBursts,
+      } = analyzeSliceVoiceActivity(subSlice, targetSampleRate, subDurSec);
+
+      subParts.push({
+        partNumber: s + 1,
+        startSec: absStartSec,
+        endSec: absEndSec,
+        durationSec: subDurSec,
+        base64Wav: encodeMonoPcm16ToWavBase64(subSlice, targetSampleRate),
+        firstVoiceRelSec,
+        lastVoiceRelSec,
+        voicedRelSeconds,
+        speechBursts,
+      });
+    }
 
     chunks.push({
       index: idx,
-      startSec,
-      endSec,
-      durationSec,
-      base64Wav: encodeMonoPcm16ToWavBase64(slice, targetSampleRate),
-      voicedRelSeconds,
-      speechBursts,
-      acousticCheckpoints,
+      startSec: pkgStartSec,
+      endSec: pkgEndSec,
+      durationSec: pkgDurationSec,
+      base64Wav: encodeMonoPcm16ToWavBase64(pkgSlice, targetSampleRate),
+      subParts,
     });
   }
 
@@ -266,171 +297,90 @@ export async function extractWavChunksFromMediaBlob(
 }
 
 /**
- * 4-Point Checkpoint Tester & Calibrator for a single block:
- * Takes 4 sample points inside the block (0%, 33%, 66%, 95%) and compares
- * the transcript timestamps against the physical acoustic voice curve (voicedRelSeconds).
- * - If the 4 sample points pass the test (within tolerance), keeps the block's timestamps untouched!
- * - If any checkpoint fails (e.g. 01:02 became 01:42 or timestamps drifted), calibrates
- *   ONLY that block onto the physical voicedRelSeconds curve!
+ * Preserves Gemini's natural relative speech timing (NEVER overwrites with word-count ratios!),
+ * while anchoring each 60-second sub-part's start and end to the physical voice onset/offset
+ * if Gemini drifted across an initial/trailing silence or outside the sub-part window.
  */
-export function verifyAndCalibrateBlockWith4Checkpoints(
-  blockItems: TranscriptItem[],
-  blockStartSec: number,
-  blockDurationSec: number,
-  voicedRelSeconds: number[]
-): { items: TranscriptItem[]; recalibrated: boolean } {
-  if (!blockItems || blockItems.length === 0) {
-    return { items: [], recalibrated: false };
-  }
-  if (voicedRelSeconds.length === 0) {
-    return { items: blockItems, recalibrated: false };
-  }
+export function anchorSubPartItemsToVoiceOnset(
+  items: TranscriptItem[],
+  subPart: WavSubPart
+): TranscriptItem[] {
+  if (!items || items.length === 0) return [];
 
-  const n = blockItems.length;
-  // Compute cumulative word weights so we know where 0%, 33%, 66%, 95% of speech sits
-  const wordCounts = blockItems.map((it) =>
-    Math.max(1, it.text.trim().split(/\s+/).length)
-  );
-  const totalWords = wordCounts.reduce((a, b) => a + b, 0);
-  const cumWords: number[] = [];
-  let running = 0;
-  for (let i = 0; i < n; i++) {
-    cumWords.push(running);
-    running += wordCounts[i];
-  }
-
-  // Expected relative second for item i based on physical acoustic voice activity
-  const expectedRelSecForIndex = (i: number): number => {
-    const ratio = totalWords > 0 ? cumWords[i] / totalWords : i / Math.max(1, n);
-    const vIdx = Math.min(
-      voicedRelSeconds.length - 1,
-      Math.max(0, Math.floor(ratio * (voicedRelSeconds.length - 1)))
-    );
-    return voicedRelSeconds[vIdx];
-  };
-
-  // Sample 4 checkpoints in this block: [0, 33%, 66%, last]
-  const sampleIndices = Array.from(
-    new Set([
+  const n = items.length;
+  const rels = items.map((it) =>
+    Math.max(
       0,
-      Math.floor((n - 1) * 0.33),
-      Math.floor((n - 1) * 0.66),
-      n - 1,
-    ])
+      Math.min(subPart.durationSec - 1, it.seconds - subPart.startSec)
+    )
   );
 
-  // Allow tighter tolerance (5s) for 60s blocks and 9s for 240s blocks
-  const maxAllowedDriftSec = blockDurationSec <= 75 ? 5 : 9;
-  let failedCheckpoints = 0;
+  const minModelRel = rels[0];
+  const maxModelRel = rels[n - 1];
+  const targetStart = subPart.firstVoiceRelSec;
+  const targetEnd = Math.max(targetStart + 1, subPart.lastVoiceRelSec);
 
-  for (const sIdx of sampleIndices) {
-    const actualRel = blockItems[sIdx].seconds - blockStartSec;
-    const expectedRel = expectedRelSecForIndex(sIdx);
-    const drift = Math.abs(actualRel - expectedRel);
-    if (drift > maxAllowedDriftSec) {
-      failedCheckpoints++;
-    }
-  }
+  // Check if Gemini's start/end for this 60s sub-part already match the physical voice onset/offset within 3s
+  const startDrift = Math.abs(minModelRel - targetStart);
+  const endDrift = Math.abs(maxModelRel - targetEnd);
 
-  // Also check if timestamps in this block are non-monotonic or bunched up
-  let nonMonotonic = false;
+  let isMonotonic = true;
   for (let i = 1; i < n; i++) {
-    if (blockItems[i].seconds < blockItems[i - 1].seconds) {
-      nonMonotonic = true;
+    if (rels[i] < rels[i - 1]) {
+      isMonotonic = false;
       break;
     }
   }
 
-  // If the 4 sample points pass the test, DO NOT touch this block — move to the next block!
-  if (failedCheckpoints === 0 && !nonMonotonic) {
-    return { items: blockItems, recalibrated: false };
+  // If Gemini's timestamps are already well-aligned with the voice onset/offset, keep them untouched!
+  if (startDrift <= 3 && endDrift <= 5 && isMonotonic) {
+    return items;
   }
 
-  // Otherwise, this block failed the 4-point test: calibrate its timestamps to the physical voice curve
-  let prevAbs = blockStartSec;
-  const calibrated = blockItems.map((item, i) => {
-    const targetRel = expectedRelSecForIndex(i);
-    let newAbs = blockStartSec + targetRel;
-    if (i > 0 && newAbs <= prevAbs) {
-      newAbs = Math.min(blockStartSec + blockDurationSec - 1, prevAbs + 1);
+  // If there is a constant shift (e.g. initial silence of 2s-8s wasn't accounted for), shift/scale smoothly while keeping Gemini's exact relative intervals!
+  const modelSpan = Math.max(1, maxModelRel - minModelRel);
+  const voiceSpan = Math.max(1, targetEnd - targetStart);
+
+  let prevAbs = subPart.startSec + targetStart;
+  return items.map((item, i) => {
+    let newRel: number;
+    if (n === 1) {
+      newRel = targetStart;
+    } else if (modelSpan >= 4) {
+      // Preserve Gemini's exact relative spacing between sentences!
+      const normalized = (rels[i] - minModelRel) / modelSpan;
+      newRel = Math.round(targetStart + normalized * voiceSpan);
+    } else {
+      const ratio = i / Math.max(1, n - 1);
+      newRel = Math.round(targetStart + ratio * voiceSpan);
     }
-    prevAbs = newAbs;
+
+    // Snap away from dead silence (>3s gap) if needed
+    if (subPart.voicedRelSeconds.length > 0) {
+      let closestVoice = subPart.voicedRelSeconds[0];
+      let minDiff = Math.abs(newRel - closestVoice);
+      for (const v of subPart.voicedRelSeconds) {
+        const d = Math.abs(newRel - v);
+        if (d < minDiff) {
+          minDiff = d;
+          closestVoice = v;
+        }
+      }
+      if (minDiff >= 2) {
+        newRel = closestVoice;
+      }
+    }
+
+    let absSec = subPart.startSec + Math.max(0, Math.min(subPart.durationSec - 1, newRel));
+    if (i > 0 && absSec < prevAbs) {
+      absSec = prevAbs;
+    }
+    prevAbs = absSec;
+
     return {
       ...item,
-      seconds: newAbs,
-      timestamp: formatSecToTimestamp(newAbs),
+      seconds: absSec,
+      timestamp: formatSecToTimestamp(absSec),
     };
   });
-
-  return { items: calibrated, recalibrated: true };
-}
-
-/**
- * Inspects an already-transcribed lecture against its real video/audio Blob in IndexedDB:
- * Tests each block at 4 checkpoints against the real PCM audio waveform.
- * Blocks that pass the 4-point test are left 100% untouched; ONLY blocks with drifted
- * timestamps (like the 00:00-04:00 block where 01:02 became 01:42) are recalibrated!
- */
-export async function verifyAndFixTranscriptWithMediaBlob(
-  blob: Blob,
-  transcript: TranscriptItem[]
-): Promise<{ items: TranscriptItem[]; anyRecalibrated: boolean }> {
-  if (!transcript || transcript.length === 0) {
-    return { items: transcript, anyRecalibrated: false };
-  }
-
-  const { monoSamples, totalDurationSec } = await decodeMediaBlobToMonoPcm(
-    blob,
-    6000
-  );
-  const sampleRate = 6000;
-
-  // Detect whether this transcript was originally created with 60s blocks or 240s blocks
-  const isOneMinBlocks = transcript.some((t) => t.id?.includes("-60s-"));
-  const blockSec = isOneMinBlocks ? 60 : 240;
-  const numBlocks = Math.max(1, Math.ceil(totalDurationSec / blockSec));
-
-  const sorted = [...transcript].sort((a, b) => a.seconds - b.seconds);
-  const output: TranscriptItem[] = [];
-  let anyRecalibrated = false;
-
-  for (let b = 0; b < numBlocks; b++) {
-    const startSec = b * blockSec;
-    const endSec = Math.min(
-      Math.ceil(totalDurationSec),
-      (b + 1) * blockSec
-    );
-    const durationSec = Math.max(1, endSec - startSec);
-    const blockItems = sorted.filter(
-      (t) =>
-        t.seconds >= startSec &&
-        (b === numBlocks - 1 ? t.seconds <= endSec + 30 : t.seconds < endSec)
-    );
-    if (blockItems.length === 0) continue;
-
-    const startSample = startSec * sampleRate;
-    const endSample = Math.min(monoSamples.length, endSec * sampleRate);
-    const slice = monoSamples.subarray(startSample, endSample);
-    const { voicedRelSeconds } = analyzeSliceVoiceActivity(
-      slice,
-      sampleRate,
-      durationSec
-    );
-
-    const { items: verifiedItems, recalibrated } =
-      verifyAndCalibrateBlockWith4Checkpoints(
-        blockItems,
-        startSec,
-        durationSec,
-        voicedRelSeconds
-      );
-
-    if (recalibrated) anyRecalibrated = true;
-    output.push(...verifiedItems);
-  }
-
-  return {
-    items: output.length > 0 ? output : sorted,
-    anyRecalibrated,
-  };
 }
