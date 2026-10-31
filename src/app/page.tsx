@@ -223,6 +223,12 @@ export default function HomePage() {
     );
   };
 
+  const handleUpdateLecture = useCallback((updated: Lecture) => {
+    setLectures((prev) =>
+      prev.map((l) => (l.id === updated.id ? updated : l))
+    );
+  }, []);
+
   const handleSaveApiKeys = async (cfg: ApiKeysConfig) => {
     setApiKeys(cfg);
     await saveEncryptedApiKeys(cfg);
@@ -499,11 +505,13 @@ export default function HomePage() {
                 course={activeCourse}
                 lectures={courseLectures}
                 activeLectureId={activeLectureId}
+                apiKeys={apiKeys}
                 onSelectLecture={setActiveLectureId}
                 onOpenUploadModal={() => setUploadModalOpen(true)}
                 onDeleteLecture={handleDeleteLecture}
                 onAskTutor={handleAskTutorFromNotes}
                 onAttachMedia={handleAttachMediaToLecture}
+                onUpdateLecture={handleUpdateLecture}
               />
             )}
           </div>

@@ -24,11 +24,18 @@ import {
   Search,
   X,
   Volume2,
+  RefreshCw,
+  Loader2,
+  BookOpen,
 } from "lucide-react";
-import { Course, Lecture, TranscriptItem } from "@/types/academic";
+import { ApiKeysConfig, Course, Lecture, TranscriptItem } from "@/types/academic";
 import { LatexFormula, MathMarkdown } from "@/components/MathMarkdown";
-import { loadMediaObjectUrl, saveMediaBlob } from "@/lib/mediaDb";
-import { generateFallbackTranscript } from "@/lib/gemini/client";
+import { loadMediaBlob, loadMediaObjectUrl, saveMediaBlob } from "@/lib/mediaDb";
+import { processLectureMultimodal } from "@/lib/gemini/client";
+import {
+  ensureDenseSecondBySecondTranscript,
+  repairLectureIfNeeded,
+} from "@/lib/emtLectureData";
 
 type NoteFilter =
   | "all"
@@ -42,23 +49,32 @@ export function LectureNoteViewer({
   course,
   lectures,
   activeLectureId,
+  apiKeys,
   onSelectLecture,
   onOpenUploadModal,
   onDeleteLecture,
   onAskTutor,
   onAttachMedia,
+  onUpdateLecture,
 }: {
   course: Course;
   lectures: Lecture[];
   activeLectureId: string;
+  apiKeys?: ApiKeysConfig;
   onSelectLecture: (id: string) => void;
   onOpenUploadModal: () => void;
   onDeleteLecture: (id: string) => void;
   onAskTutor: (promptText: string) => void;
   onAttachMedia?: (lectureId: string, file: File) => void;
+  onUpdateLecture?: (updated: Lecture) => void;
 }) {
-  const activeLecture =
+  const rawActiveLecture =
     lectures.find((l) => l.id === activeLectureId) || lectures[0];
+
+  const activeLecture = React.useMemo(() => {
+    if (!rawActiveLecture) return undefined;
+    return repairLectureIfNeeded(rawActiveLecture).lecture;
+  }, [rawActiveLecture]);
 
   const [filter, setFilter] = useState<NoteFilter>("all");
   const [mediaObjectUrl, setMediaObjectUrl] = useState<string | null>(null);
@@ -71,6 +87,8 @@ export function LectureNoteViewer({
   const [transcriptSearch, setTranscriptSearch] = useState<string>("");
   const [transcriptTab, setTranscriptTab] = useState<"all" | "important">("all");
   const [autoScrollTranscript, setAutoScrollTranscript] = useState<boolean>(true);
+  const [reprocessing, setReprocessing] = useState<boolean>(false);
+  const [reprocessStage, setReprocessStage] = useState<string>("");
   const [openTranscripts, setOpenTranscripts] = useState<Record<string, boolean>>(
     {}
   );
@@ -111,19 +129,17 @@ export function LectureNoteViewer({
 
   const transcriptItems: TranscriptItem[] = React.useMemo(() => {
     if (!activeLecture) return [];
-    if (activeLecture.transcript && activeLecture.transcript.length > 0) {
-      return activeLecture.transcript;
-    }
-    return generateFallbackTranscript(
+    return ensureDenseSecondBySecondTranscript(
+      activeLecture.transcript,
       activeLecture.timeline,
       activeLecture.executiveSummary,
-      2000
+      activeLecture.durationLabel
     );
   }, [activeLecture]);
 
   const activeTranscriptIndex = React.useMemo(() => {
     if (!transcriptItems || transcriptItems.length === 0) return -1;
-    let idx = -1;
+    let idx = 0;
     for (let i = 0; i < transcriptItems.length; i++) {
       if (currentTime >= transcriptItems[i].seconds) {
         idx = i;
@@ -134,10 +150,13 @@ export function LectureNoteViewer({
     return idx;
   }, [transcriptItems, currentTime]);
 
+  const activeTranscriptId =
+    activeTranscriptIndex >= 0 ? transcriptItems[activeTranscriptIndex]?.id : null;
+
   useEffect(() => {
-    if (!autoScrollTranscript || activeTranscriptIndex < 0 || transcriptSearch) return;
+    if (!autoScrollTranscript || !activeTranscriptId || transcriptSearch) return;
     const targetElement = document.getElementById(
-      `transcript-row-${activeTranscriptIndex}`
+      `transcript-row-${activeTranscriptId}`
     );
     if (targetElement && transcriptContainerRef.current) {
       targetElement.scrollIntoView({
@@ -145,7 +164,50 @@ export function LectureNoteViewer({
         block: "nearest",
       });
     }
-  }, [activeTranscriptIndex, autoScrollTranscript, transcriptSearch]);
+  }, [activeTranscriptId, autoScrollTranscript, transcriptSearch]);
+
+  const handleReanalyzeCurrentVideo = async (overrideFile?: File) => {
+    if (!activeLecture || reprocessing) return;
+    setReprocessing(true);
+    setReprocessStage("Video ve ses verisi hazırlanıyor...");
+    try {
+      let fileToAnalyze = overrideFile;
+      if (!fileToAnalyze && activeLecture.mediaBlobKey) {
+        const blob = await loadMediaBlob(activeLecture.mediaBlobKey);
+        if (blob) {
+          fileToAnalyze = new File(
+            [blob],
+            `${activeLecture.title}.mp4`,
+            { type: activeLecture.mediaMimeType || blob.type || "video/mp4" }
+          );
+        }
+      }
+
+      if (apiKeys?.geminiApiKey) {
+        const result = await processLectureMultimodal({
+          apiKey: apiKeys.geminiApiKey,
+          model: apiKeys.geminiModel || "gemini-3-flash-preview",
+          course,
+          lectureTitle: activeLecture.title,
+          file: fileToAnalyze,
+          onProgress: (stage) => setReprocessStage(stage),
+        });
+        onUpdateLecture?.({
+          ...activeLecture,
+          ...result,
+        });
+      } else {
+        const { lecture: repaired } = repairLectureIfNeeded(activeLecture);
+        onUpdateLecture?.(repaired);
+      }
+    } catch {
+      const { lecture: repaired } = repairLectureIfNeeded(activeLecture);
+      onUpdateLecture?.(repaired);
+    } finally {
+      setReprocessing(false);
+      setReprocessStage("");
+    }
+  };
 
   const importantTranscriptCount = React.useMemo(() => {
     return transcriptItems.filter((t) => t.isImportant).length;
@@ -331,8 +393,24 @@ export function LectureNoteViewer({
           const objUrl = URL.createObjectURL(file);
           setMediaObjectUrl(objUrl);
           onAttachMedia?.(activeLecture.id, file);
+          handleReanalyzeCurrentVideo(file);
         }}
       />
+
+      {reprocessing && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-200">
+          <div className="flex items-center gap-2 font-medium">
+            <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
+            <span>
+              {reprocessStage ||
+                "Video saniye saniye analiz ediliyor ve konu anlatımları çıkarılıyor..."}
+            </span>
+          </div>
+          <span className="font-mono text-[11px] text-amber-300">
+            AI Multimodal Aktif
+          </span>
+        </div>
+      )}
 
       {/* Media Player & Synchronized Transcript Panel (Google Drive / Vids Style) */}
       <div
@@ -404,6 +482,20 @@ export function LectureNoteViewer({
               <span className="rounded bg-sky-500/20 px-1 py-0.2 font-mono text-[10px] text-sky-200">
                 {transcriptItems.length}
               </span>
+            </button>
+
+            {/* Re-analyze current video button */}
+            <button
+              type="button"
+              disabled={reprocessing}
+              onClick={() => handleReanalyzeCurrentVideo()}
+              title="Videoyu Yeniden Analiz Et ve Saniye Saniye Transkripti Güncelle"
+              className="flex items-center gap-1.5 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 cursor-pointer transition"
+            >
+              <RefreshCw
+                className={`h-3 w-3 ${reprocessing ? "animate-spin" : ""}`}
+              />
+              <span className="hidden sm:inline">Yeniden Analiz Et</span>
             </button>
 
             {/* Attach or change video */}
@@ -645,11 +737,11 @@ export function LectureNoteViewer({
                   </div>
                 ) : (
                   filteredTranscript.map((item, index) => {
-                    const isActive = activeTranscriptIndex === index;
+                    const isActive = item.id === activeTranscriptId;
                     return (
                       <div
                         key={item.id}
-                        id={`transcript-row-${index}`}
+                        id={`transcript-row-${item.id}`}
                         onClick={() => handleJumpToTranscript(item, index)}
                         className={`group flex items-start gap-2.5 rounded-lg p-2 transition cursor-pointer ${
                           isActive
@@ -780,14 +872,78 @@ export function LectureNoteViewer({
         ))}
       </div>
 
-      {/* 1. EXECUTIVE SUMMARY */}
+      {/* 1. EXECUTIVE SUMMARY & TOPIC SYNTHESIS FROM TRANSCRIPT */}
       {filter === "all" && (
-        <section className="rounded-2xl border border-zinc-800/90 bg-zinc-900/30 p-4 sm:p-5 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
-            <FileText className="h-3.5 w-3.5 text-amber-400" />
-            <span>Yönetici Özeti (Executive Summary)</span>
+        <section className="rounded-2xl border border-zinc-800/90 bg-zinc-900/30 p-4 sm:p-5 space-y-4">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                <FileText className="h-3.5 w-3.5 text-amber-400" />
+                <span>Yönetici Özeti &amp; Dersin Akademik Sentezi</span>
+              </div>
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
+                {transcriptItems.length} Konuşma Satırı Analiz Edildi
+              </span>
+            </div>
+            <MathMarkdown content={activeLecture.executiveSummary} />
           </div>
-          <MathMarkdown content={activeLecture.executiveSummary} />
+
+          {activeLecture.timeline.length > 0 && (
+            <div className="border-t border-zinc-800/80 pt-3.5 space-y-2.5">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                <BookOpen className="h-3.5 w-3.5 text-amber-400" />
+                <span>
+                  Transkript Sözlerine Göre Derste İşlenen Konular ({activeLecture.timeline.length} Ana Konu)
+                </span>
+              </div>
+              <div className="grid gap-2.5 sm:grid-cols-2">
+                {activeLecture.timeline.map((seg, i) => (
+                  <div
+                    key={`topic-card-${seg.id}`}
+                    className="flex flex-col justify-between rounded-xl border border-zinc-800/90 bg-zinc-950/70 p-3 space-y-2 hover:border-amber-500/40 transition"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleJumpToTimestamp(seg.timestamp, seg.seconds)
+                          }
+                          className="inline-flex items-center gap-1 rounded bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300 hover:bg-amber-500/25 cursor-pointer"
+                        >
+                          <Play className="h-2.5 w-2.5" />
+                          <span>{seg.timestamp}</span>
+                        </button>
+                        <span className="font-mono text-[10px] text-zinc-500">
+                          Konu #{i + 1}
+                        </span>
+                      </div>
+                      <div className="text-xs font-bold text-zinc-100">
+                        {seg.title}
+                      </div>
+                      <div className="text-xs text-zinc-300 leading-relaxed">
+                        <MathMarkdown content={seg.summary} />
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onAskTutor(
+                            `Derste [${seg.timestamp}] dakikasında işlenen "${seg.title}" konusunu bana sıfırdan, tüm formülleri ve fiziksel mantığıyla adım adım anlatır mısın?`
+                          )
+                        }
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300 hover:text-amber-200 cursor-pointer"
+                      >
+                        <MessageSquarePlus className="h-3 w-3" />
+                        <span>Bu Konuyu Detaylı Anlat</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
       )}
 

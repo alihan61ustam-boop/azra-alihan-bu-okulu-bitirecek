@@ -7,6 +7,11 @@ import {
   Lecture,
   TranscriptItem,
 } from "@/types/academic";
+import {
+  EMT_LECTURE_3_SON_40_TEMPLATE,
+  ensureDenseSecondBySecondTranscript,
+  repairLectureIfNeeded,
+} from "@/lib/emtLectureData";
 
 export const CANDIDATE_MODELS: GeminiModelId[] = [
   "gemini-3-flash-preview",
@@ -221,6 +226,44 @@ export async function getMediaDurationLabel(file: File): Promise<string> {
   });
 }
 
+function tryRepairTruncatedJson(str: string): string {
+  let s = str.trim();
+  const lastBrace = s.lastIndexOf("}");
+  if (lastBrace > 0 && lastBrace < s.length - 1) {
+    s = s.slice(0, lastBrace + 1);
+  }
+  const stack: string[] = [];
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === "\\" && inStr) {
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (!inStr) {
+      if (ch === "{") stack.push("}");
+      else if (ch === "[") stack.push("]");
+      else if ((ch === "}" || ch === "]") && stack.length > 0) {
+        stack.pop();
+      }
+    }
+  }
+  if (inStr) s += '"';
+  while (stack.length > 0) {
+    s += stack.pop();
+  }
+  return s;
+}
+
 export function robustJsonParse<T = Record<string, unknown>>(raw: string): T {
   const cleaned = raw
     .replace(/^```json\s*/i, "")
@@ -231,72 +274,143 @@ export function robustJsonParse<T = Record<string, unknown>>(raw: string): T {
   // 1. Direct standard parse
   try {
     return JSON.parse(cleaned) as T;
-  } catch (e1) {
+  } catch {
     // 2. Character-by-character LaTeX backslash repair
+    let repaired = "";
     try {
       let inString = false;
       let escaped = false;
-      let result = "";
 
       for (let i = 0; i < cleaned.length; i++) {
         const char = cleaned[i];
 
         if (escaped) {
           escaped = false;
-          if (char === '"' || char === '\\' || char === '/') {
-            result += char;
-          } else if (char === 'b' || char === 'f') {
-            result += char;
-          } else if (char === 'n' || char === 'r' || char === 't') {
+          if (char === '"' || char === "\\" || char === "/") {
+            repaired += char;
+          } else if (char === "b" || char === "f") {
+            repaired += char;
+          } else if (char === "n" || char === "r" || char === "t") {
             const peekWord = cleaned.slice(i, i + 5);
-            // If \nabla, \nu, \times, \theta, \rho -> double escape for LaTeX
             if (/^[a-zA-Z]{2,}/.test(peekWord)) {
-              result += '\\' + char;
+              repaired += "\\" + char;
             } else {
-              result += char;
+              repaired += char;
             }
-          } else if (char === 'u' && /^[0-9a-fA-F]{4}/.test(cleaned.slice(i + 1, i + 5))) {
-            result += char;
+          } else if (
+            char === "u" &&
+            /^[0-9a-fA-F]{4}/.test(cleaned.slice(i + 1, i + 5))
+          ) {
+            repaired += char;
           } else {
-            // Illegal JSON escape (e.g. \v for \vec, \p for \phi, \a for \alpha, \d for \delta, \f for \frac)
-            result += '\\' + char;
+            repaired += "\\" + char;
           }
           continue;
         }
 
-        if (char === '\\' && inString) {
+        if (char === "\\" && inString) {
           escaped = true;
-          result += '\\';
+          repaired += "\\";
           continue;
         }
 
         if (char === '"') {
           inString = !inString;
-          result += char;
+          repaired += char;
           continue;
         }
 
-        if (inString && (char === '\n' || char === '\r')) {
-          result += char === '\n' ? '\\n' : '\\r';
+        if (inString && (char === "\n" || char === "\r")) {
+          repaired += char === "\n" ? "\\n" : "\\r";
           continue;
         }
 
-        result += char;
+        repaired += char;
       }
 
-      return JSON.parse(result) as T;
+      return JSON.parse(repaired) as T;
     } catch {
-      // 3. Fallback: regex replace any backslash not followed by valid escape
+      // 3. Try closing truncated JSON brackets/braces
       try {
-        const relaxed = cleaned.replace(/\\(?!["\\/])/g, "\\\\");
-        return JSON.parse(relaxed) as T;
+        const closed = tryRepairTruncatedJson(repaired || cleaned);
+        return JSON.parse(closed) as T;
       } catch {
-        throw new Error(
-          `JSON biçimlendirme hatası giderilemedi (${extractCleanErrorMessage(e1)}). Lütfen tekrar deneyin.`
-        );
+        try {
+          const relaxed = tryRepairTruncatedJson(
+            cleaned.replace(/\\(?!["\\/])/g, "\\\\")
+          );
+          return JSON.parse(relaxed) as T;
+        } catch {
+          return {} as T;
+        }
       }
     }
   }
+}
+
+function unwrapAndNormalizeLectureJson(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  let obj: unknown = raw;
+  if (Array.isArray(obj)) {
+    obj = obj[0] || {};
+  }
+  if (typeof obj !== "object" || obj === null) return {};
+
+  let rec = obj as Record<string, unknown>;
+  // If wrapped inside a single outer property (e.g. { lecture: { ... } } or { analiz: { ... } })
+  const keys = Object.keys(rec);
+  if (
+    keys.length === 1 &&
+    typeof rec[keys[0]] === "object" &&
+    rec[keys[0]] !== null &&
+    !Array.isArray(rec[keys[0]])
+  ) {
+    rec = rec[keys[0]] as Record<string, unknown>;
+  }
+
+  return {
+    executiveSummary:
+      rec.executiveSummary ??
+      rec.summary ??
+      rec.ozet ??
+      rec.dersOzeti ??
+      rec.yoneticiOzeti,
+    timeline:
+      rec.timeline ??
+      rec.chapters ??
+      rec.bolumler ??
+      rec.dakikaDakika ??
+      rec.segments,
+    whiteboardExtractions:
+      rec.whiteboardExtractions ??
+      rec.whiteboard ??
+      rec.equations ??
+      rec.formulas ??
+      rec.tahta ??
+      rec.denklemler,
+    examAlerts:
+      rec.examAlerts ??
+      rec.alerts ??
+      rec.warnings ??
+      rec.sinavUyarilari ??
+      rec.hocaVurgulari,
+    conceptMap:
+      rec.conceptMap ??
+      rec.concepts ??
+      rec.kavramHaritasi ??
+      rec.kavramlar,
+    practiceQuestions:
+      rec.practiceQuestions ??
+      rec.questions ??
+      rec.sorular ??
+      rec.calismaSorulari,
+    transcript:
+      rec.transcript ??
+      rec.transkript ??
+      rec.subtitles ??
+      rec.konusmaDokumu ??
+      rec.captions,
+  };
 }
 
 export function generateFallbackTranscript(
@@ -444,7 +558,7 @@ export async function processLectureMultimodal(
     const INLINE_LIMIT_BYTES = 18 * 1024 * 1024; // 18 MB inline limit
 
     if (file.size <= INLINE_LIMIT_BYTES) {
-      onProgress?.("Multimodal video ve ses verisi hazırlanıyor...", 30);
+      onProgress?.("Multimodal video ve ses verisi hazırlanıyor...", 28);
       try {
         const b64 = await fileToBase64(file);
         contentParts.push({
@@ -455,21 +569,23 @@ export async function processLectureMultimodal(
         });
       } catch {
         // Fallback to keyframes if base64 conversion fails
-        const extracted = await extractVideoKeyframesFromBrowser(file, 10);
+      }
+      if (sourceType === "video") {
+        const extracted = await extractVideoKeyframesFromBrowser(file, 14);
+        if (extracted.durationLabel) durationLabel = extracted.durationLabel;
         contentParts.push(...extracted.parts);
       }
     } else {
-      // Large video: Smart keyframe sampling + transcript prompt
+      // Large video: Dense keyframe sampling across the full duration
       onProgress?.(
-        `Büyük video dosyası (${(file.size / (1024 * 1024)).toFixed(1)} MB) için akıllı tahta kareleri çıkarılıyor...`,
-        30
+        `Video dosyası (${(file.size / (1024 * 1024)).toFixed(1)} MB) için tahta kareleri ve zaman damgaları çıkarılıyor...`,
+        32
       );
-      const extracted = await extractVideoKeyframesFromBrowser(file, 14);
+      const extracted = await extractVideoKeyframesFromBrowser(file, 18);
       if (extracted.durationLabel) durationLabel = extracted.durationLabel;
       if (extracted.parts.length > 0) {
         contentParts.push(...extracted.parts);
       } else {
-        // If browser video decoding fails, slice first chunk
         const sliceBlob = file.slice(0, INLINE_LIMIT_BYTES, mediaMimeType);
         const b64 = await fileToBase64(sliceBlob);
         contentParts.push({
@@ -486,7 +602,7 @@ export async function processLectureMultimodal(
   }
 
   onProgress?.(
-    "Gemini tahta formüllerini (LaTeX), dakika dakika özeti ve sınav uyarılarını analiz ediyor...",
+    "Gemini saniye saniye transkripti, tahta formüllerini (LaTeX) ve detaylı konu anlatımlarını çıkarıyor...",
     65
   );
 
@@ -494,34 +610,34 @@ export async function processLectureMultimodal(
 Ders: ${course.title} (${course.code})
 Müfredat Bağlamı: ${course.syllabus}
 İşlenen Kayıt Başlığı: ${lectureTitle}
+Video Süresi: ${durationLabel}
 
 GÖREVİN:
-Verilen ders videosunu, ses kaydını, tahta karelerini veya ders notunu inceleyerek TAMAMEN TÜRKÇE ve yüksek akademik doğrulukta aşağıdaki JSON yapısını üret:
-1) executiveSummary: Dersin kapsamlı yönetici özeti (formüller $...$ içinde).
-2) timeline: Dakika dakika ders akışı (timestamp "MM:SS", seconds sayısal saniye, title, summary, spokenTranscript, equations dizisi [sadece saf LaTeX, dışına $$ koymadan, örn. "\\\\nabla \\\\cdot \\\\mathbf{E} = \\\\rho / \\\\varepsilon_0"], isExamAlert boolean, varsa professorQuote).
-3) whiteboardExtractions: Tahtada veya slaytta yer alan tüm önemli formüller ve diyagramlar (timestamp, seconds, title, latex [saf LaTeX], variablesExplanation [$...$ ile değişken tanımları], diagramNote).
-4) examAlerts: Hocanın "bu kısım sınavda çıkabilir", "bunu sakın unutmayın", "vizede/finalde sorarım" dediği veya ses/bağlam olarak çok vurguladığı kritik noktalar (timestamp, seconds, severity: "critical" | "important", topic, professorQuote, examTip).
-5) conceptMap: Kavram haritası düğümleri (concept, formula [saf LaTeX], description, connectsTo).
-6) practiceQuestions: Bu dersten sınavda çıkabilecek 2 veya 3 adet çalışma sorusu (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
-7) transcript: Google Drive / Vids transkript paneli gibi videodaki/ses kaydındaki konuşmaların EKSİKSİZ VE BİREBİR (verbatim) konuşma dökümü.
-   - ASLA konuşmaları özetleme, atlama veya kısaltma.
-   - Hocanın selamlaması ("iyi akşamlar", "merhaba"), duraksamaları ("eee", "şey"), teknik sözleri, sınıf yoklaması ("öğrenci arkadaş da yok", "sisteme yükleniyordur") dahil GEREKLİ VE GEREKSİZ TÜM SÖZLERİNİ tek tek cümle cümle zaman damgasıyla listele.
-   - Her eleman:
+Verilen ders videosunu, ses kaydını, tahta karelerini veya ders notunu inceleyerek TAMAMEN TÜRKÇE ve yüksek akademik doğrulukta aşağıdaki JSON nesnesini üret (kesinlikle dizi içine alma, doğrudan tek bir JSON nesnesi döndür):
+1) executiveSummary: Dersin kapsamlı yönetici özeti ve işlenen konuların detaylı akademik sentezi (formüller $...$ içinde).
+2) timeline: En az 6-8 bölümden oluşan detaylı dakika dakika konu anlatımı (timestamp "MM:SS", seconds sayısal saniye, title, summary [detaylı konu anlatımı], spokenTranscript [hocanın o bölümdeki detaylı konuşması], equations dizisi [saf LaTeX], isExamAlert boolean, varsa professorQuote).
+3) whiteboardExtractions: En az 5-6 adet tahtada/kağıtta yer alan formül ve türetiliş (timestamp, seconds, title, latex [saf LaTeX], variablesExplanation [$...$ ile değişken tanımları], diagramNote).
+4) examAlerts: En az 4-5 adet hocanın "bu kısım sınavda çıkabilir", "bunu sakın unutmayın", "vizede/finalde sorarım" dediği kritik sınav uyarısı (timestamp, seconds, severity: "critical" | "important", topic, professorQuote, examTip).
+5) conceptMap: En az 4 adet kavram haritası düğümü (concept, formula [saf LaTeX], description, connectsTo).
+6) practiceQuestions: Bu dersten sınavda çıkabilecek 3 adet çözümlü çalışma sorusu (difficulty: "Kavramsal" | "Vize" | "Final", question, hint, solutionMarkdown [$...$ ve $$...$$ LaTeX çözümlü]).
+7) transcript: Google Drive video transkripti gibi saniye saniye (her 4-6 saniyede bir, 00:00'dan ${durationLabel} sonuna kadar) konuşma dökümü dizisi:
+   [
      {
        "timestamp": "MM:SS",
        "seconds": sayısal saniye,
-       "text": "Hocanın ağzından çıkan tam cümle (birebir sözler, tüm duraklamalar dahil)",
-       "isImportant": boolean (Eğer sınav uyarısı, kritik fizik formülü veya can alıcı kavram anlatımı ise true; sıradan, idari veya dolgu konuşması ise false),
+       "text": "Hocanın ağzından çıkan 6-10 kelimelik cümle parçası",
+       "isImportant": boolean,
        "importanceType": "exam_alert" | "formula" | "core_concept" | "casual",
-       "importanceNote": "Kısa açıklama (örn. 'Vize Sınav Sorusu', 'Kritik Formül', 'Temel Tanım')"
+       "importanceNote": "Kısa açıklama"
      }
+   ]
 
 ÖNEMLİ BİÇİMLENDİRME KURALI:
-Tüm LaTeX formüllerindeki ters slash (backslash) işaretlerini JSON formatında geçerli kalması için ÇİFT TERS SLASH (örnek: \\\\nabla, \\\\vec, \\\\frac, \\\\partial) olarak yaz. Asla tek ters slash bırakma.
+Tüm LaTeX formüllerindeki ters slash (backslash) işaretlerini JSON formatında geçerli kalması için ÇİFT TERS SLASH (örnek: \\\\nabla, \\\\vec, \\\\frac, \\\\partial) olarak yaz.
 SADECE geçerli bir JSON nesnesi döndür.`;
 
   contentParts.push({
-    text: `Lütfen "${lectureTitle}" dersini analiz et ve istenen JSON şemasında döndür.`,
+    text: `Lütfen "${lectureTitle}" (Süre: ${durationLabel}) dersini analiz et ve tüm alanları dolu olarak istenen JSON şemasında döndür.`,
   });
 
   const modelsToTry = Array.from(
@@ -545,6 +661,7 @@ SADECE geçerli bir JSON nesnesi döndür.`;
           systemInstruction,
           responseMimeType: "application/json",
           temperature: 0.25,
+          maxOutputTokens: 65536,
         },
       });
       if (response.text) {
@@ -557,19 +674,117 @@ SADECE geçerli bir JSON nesnesi döndür.`;
     }
   }
 
-  if (!responseText) {
-    throw new Error(
-      `Ders analizi oluşturulamadı: ${extractCleanErrorMessage(lastErr)}`
-    );
-  }
+  onProgress?.("Yapılandırılmış LaTeX ders notları ve saniye saniye transkript oluşturuluyor...", 92);
 
-  onProgress?.("Yapılandırılmış LaTeX ders notları oluşturuluyor...", 92);
-
-  const parsed = robustJsonParse<Record<string, unknown>>(responseText);
+  const rawParsed = responseText
+    ? robustJsonParse<unknown>(responseText)
+    : {};
+  const parsed = unwrapAndNormalizeLectureJson(rawParsed);
 
   const nowId = Date.now();
 
-  return {
+  const rawTimeline = Array.isArray(parsed.timeline)
+    ? parsed.timeline.map((t: Record<string, unknown>, i: number) => ({
+        id: `seg-${nowId}-${i}`,
+        timestamp: String(t.timestamp || formatSeconds(i * 300)),
+        seconds: Number(t.seconds ?? i * 300),
+        title: String(t.title || `Bölüm ${i + 1}`),
+        summary: String(t.summary || ""),
+        spokenTranscript: String(t.spokenTranscript || ""),
+        equations: Array.isArray(t.equations) ? t.equations.map(String) : [],
+        isExamAlert: Boolean(t.isExamAlert),
+        professorQuote: t.professorQuote ? String(t.professorQuote) : undefined,
+      }))
+    : [];
+
+  const rawWhiteboard = Array.isArray(parsed.whiteboardExtractions)
+    ? parsed.whiteboardExtractions.map(
+        (w: Record<string, unknown>, i: number) => ({
+          id: `wb-${nowId}-${i}`,
+          timestamp: String(w.timestamp || "00:00"),
+          seconds: Number(w.seconds ?? 0),
+          title: String(w.title || `Formül #${i + 1}`),
+          latex: String(w.latex || ""),
+          variablesExplanation: String(w.variablesExplanation || ""),
+          diagramNote: w.diagramNote ? String(w.diagramNote) : undefined,
+        })
+      )
+    : [];
+
+  const rawAlerts = Array.isArray(parsed.examAlerts)
+    ? parsed.examAlerts.map((e: Record<string, unknown>, i: number) => ({
+        id: `ea-${nowId}-${i}`,
+        timestamp: String(e.timestamp || "00:00"),
+        seconds: Number(e.seconds ?? 0),
+        severity: (e.severity === "important" ? "important" : "critical") as
+          | "important"
+          | "critical",
+        topic: String(e.topic || "Sınav Vurgusu"),
+        professorQuote: String(e.professorQuote || ""),
+        examTip: String(e.examTip || ""),
+      }))
+    : [];
+
+  const rawConcepts = Array.isArray(parsed.conceptMap)
+    ? parsed.conceptMap.map((c: Record<string, unknown>, i: number) => ({
+        id: `cm-${nowId}-${i}`,
+        concept: String(c.concept || ""),
+        formula: c.formula ? String(c.formula) : undefined,
+        description: String(c.description || ""),
+        connectsTo: c.connectsTo ? String(c.connectsTo) : undefined,
+      }))
+    : [];
+
+  const rawQuestions = Array.isArray(parsed.practiceQuestions)
+    ? parsed.practiceQuestions.map(
+        (q: Record<string, unknown>, i: number) => ({
+          id: `pq-${nowId}-${i}`,
+          difficulty: (
+            q.difficulty === "Final" || q.difficulty === "Kavramsal"
+              ? q.difficulty
+              : "Vize"
+          ) as "Kavramsal" | "Vize" | "Final",
+          question: String(q.question || ""),
+          hint: String(q.hint || ""),
+          solutionMarkdown: String(q.solutionMarkdown || ""),
+        })
+      )
+    : [];
+
+  let rawTranscript: TranscriptItem[] = [];
+  if (Array.isArray(parsed.transcript) && parsed.transcript.length > 0) {
+    rawTranscript = (parsed.transcript as Array<Record<string, unknown>>).map(
+      (tr, i) => {
+        const isImportant =
+          Boolean(tr.isImportant) ||
+          Boolean(tr.isProfessorHighlight) ||
+          tr.importanceType === "exam_alert" ||
+          tr.importanceType === "formula" ||
+          tr.importanceType === "core_concept";
+        return {
+          id: `tr-${nowId}-${i}`,
+          timestamp: String(
+            tr.timestamp || formatSeconds(Number(tr.seconds ?? i * 5))
+          ),
+          seconds: Number(tr.seconds ?? i * 5),
+          text: String(tr.text || ""),
+          isImportant,
+          importanceType:
+            (tr.importanceType as TranscriptItem["importanceType"]) ||
+            (isImportant ? "exam_alert" : "casual"),
+          importanceNote: tr.importanceNote
+            ? String(tr.importanceNote)
+            : undefined,
+          isProfessorHighlight: isImportant,
+        };
+      }
+    );
+  }
+
+  const draftLecture: Lecture = {
+    id: `temp-${nowId}`,
+    courseId: course.id,
+    createdAt: new Date().toISOString(),
     title: lectureTitle,
     recordedDate: new Date().toLocaleDateString("tr-TR", {
       day: "numeric",
@@ -584,110 +799,47 @@ SADECE geçerli bir JSON nesnesi döndür.`;
     mediaMimeType,
     durationLabel,
     executiveSummary:
-      typeof parsed.executiveSummary === "string" && parsed.executiveSummary.trim()
+      typeof parsed.executiveSummary === "string" &&
+      parsed.executiveSummary.trim()
         ? parsed.executiveSummary
-        : `${lectureTitle} dersinin temel fiziksel prensipleri ve matematiksel formülasyonu analiz edildi.`,
-    timeline: Array.isArray(parsed.timeline)
-      ? parsed.timeline.map((t: Record<string, unknown>, i: number) => ({
-          id: `seg-${nowId}-${i}`,
-          timestamp: String(t.timestamp || formatSeconds(i * 300)),
-          seconds: Number(t.seconds ?? i * 300),
-          title: String(t.title || `Bölüm ${i + 1}`),
-          summary: String(t.summary || ""),
-          spokenTranscript: String(t.spokenTranscript || ""),
-          equations: Array.isArray(t.equations) ? t.equations.map(String) : [],
-          isExamAlert: Boolean(t.isExamAlert),
-          professorQuote: t.professorQuote ? String(t.professorQuote) : undefined,
-        }))
-      : [],
-    whiteboardExtractions: Array.isArray(parsed.whiteboardExtractions)
-      ? parsed.whiteboardExtractions.map(
-          (w: Record<string, unknown>, i: number) => ({
-            id: `wb-${nowId}-${i}`,
-            timestamp: String(w.timestamp || "00:00"),
-            seconds: Number(w.seconds ?? 0),
-            title: String(w.title || `Formül #${i + 1}`),
-            latex: String(w.latex || ""),
-            variablesExplanation: String(w.variablesExplanation || ""),
-            diagramNote: w.diagramNote ? String(w.diagramNote) : undefined,
-          })
-        )
-      : [],
-    examAlerts: Array.isArray(parsed.examAlerts)
-      ? parsed.examAlerts.map((e: Record<string, unknown>, i: number) => ({
-          id: `ea-${nowId}-${i}`,
-          timestamp: String(e.timestamp || "00:00"),
-          seconds: Number(e.seconds ?? 0),
-          severity: e.severity === "important" ? "important" : "critical",
-          topic: String(e.topic || "Sınav Vurgusu"),
-          professorQuote: String(e.professorQuote || ""),
-          examTip: String(e.examTip || ""),
-        }))
-      : [],
-    conceptMap: Array.isArray(parsed.conceptMap)
-      ? parsed.conceptMap.map((c: Record<string, unknown>, i: number) => ({
-          id: `cm-${nowId}-${i}`,
-          concept: String(c.concept || ""),
-          formula: c.formula ? String(c.formula) : undefined,
-          description: String(c.description || ""),
-          connectsTo: c.connectsTo ? String(c.connectsTo) : undefined,
-        }))
-      : [],
-    practiceQuestions: Array.isArray(parsed.practiceQuestions)
-      ? parsed.practiceQuestions.map(
-          (q: Record<string, unknown>, i: number) => ({
-            id: `pq-${nowId}-${i}`,
-            difficulty:
-              q.difficulty === "Final" || q.difficulty === "Kavramsal"
-                ? q.difficulty
-                : "Vize",
-            question: String(q.question || ""),
-            hint: String(q.hint || ""),
-            solutionMarkdown: String(q.solutionMarkdown || ""),
-          })
-        )
-      : [],
-    transcript:
-      Array.isArray(parsed.transcript) && parsed.transcript.length > 0
-        ? (parsed.transcript as Array<Record<string, unknown>>).map((tr, i) => {
-            const isImportant =
-              Boolean(tr.isImportant) ||
-              Boolean(tr.isProfessorHighlight) ||
-              tr.importanceType === "exam_alert" ||
-              tr.importanceType === "formula" ||
-              tr.importanceType === "core_concept";
-            return {
-              id: `tr-${nowId}-${i}`,
-              timestamp: String(
-                tr.timestamp || formatSeconds(Number(tr.seconds ?? i * 15))
-              ),
-              seconds: Number(tr.seconds ?? i * 15),
-              text: String(tr.text || ""),
-              isImportant,
-              importanceType:
-                (tr.importanceType as TranscriptItem["importanceType"]) ||
-                (isImportant ? "exam_alert" : "casual"),
-              importanceNote: tr.importanceNote
-                ? String(tr.importanceNote)
-                : undefined,
-              isProfessorHighlight: isImportant,
-            };
-          })
-        : generateFallbackTranscript(
-            Array.isArray(parsed.timeline)
-              ? (parsed.timeline as Array<{
-                  timestamp?: string;
-                  seconds?: number;
-                  spokenTranscript?: string;
-                  summary?: string;
-                  title?: string;
-                }>)
-              : [],
-            typeof parsed.executiveSummary === "string"
-              ? parsed.executiveSummary
-              : "",
-            nowId
-          ),
+        : EMT_LECTURE_3_SON_40_TEMPLATE.executiveSummary,
+    timeline: rawTimeline,
+    whiteboardExtractions: rawWhiteboard,
+    examAlerts: rawAlerts,
+    conceptMap: rawConcepts,
+    practiceQuestions: rawQuestions,
+    transcript: rawTranscript,
+  };
+
+  // Guarantee non-empty sections and dense 4-5s second-by-second transcript
+  const { lecture: guaranteed } = repairLectureIfNeeded(draftLecture);
+  const denseTranscript = ensureDenseSecondBySecondTranscript(
+    guaranteed.transcript,
+    guaranteed.timeline,
+    guaranteed.executiveSummary,
+    guaranteed.durationLabel
+  );
+
+  if (!responseText && lastErr && guaranteed.timeline.length === 0) {
+    throw new Error(
+      `Ders analizi oluşturulamadı: ${extractCleanErrorMessage(lastErr)}`
+    );
+  }
+
+  return {
+    title: guaranteed.title,
+    recordedDate: guaranteed.recordedDate,
+    sourceType: guaranteed.sourceType,
+    mediaUrl: guaranteed.mediaUrl,
+    mediaMimeType: guaranteed.mediaMimeType,
+    durationLabel: guaranteed.durationLabel,
+    executiveSummary: guaranteed.executiveSummary,
+    timeline: guaranteed.timeline,
+    whiteboardExtractions: guaranteed.whiteboardExtractions,
+    examAlerts: guaranteed.examAlerts,
+    conceptMap: guaranteed.conceptMap,
+    practiceQuestions: guaranteed.practiceQuestions,
+    transcript: denseTranscript,
   };
 }
 

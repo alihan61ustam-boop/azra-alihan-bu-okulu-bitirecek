@@ -35,7 +35,7 @@ export async function saveMediaBlob(key: string, blob: Blob): Promise<void> {
   }
 }
 
-export async function loadMediaObjectUrl(key: string): Promise<string | null> {
+export async function loadMediaBlob(key: string): Promise<Blob | null> {
   try {
     const db = await openMediaDb();
     const blob = await new Promise<Blob | undefined>((resolve, reject) => {
@@ -45,11 +45,16 @@ export async function loadMediaObjectUrl(key: string): Promise<string | null> {
       req.onerror = () => reject(req.error);
     });
     db.close();
-    if (!blob) return null;
-    return URL.createObjectURL(blob);
+    return blob || null;
   } catch {
     return null;
   }
+}
+
+export async function loadMediaObjectUrl(key: string): Promise<string | null> {
+  const blob = await loadMediaBlob(key);
+  if (!blob) return null;
+  return URL.createObjectURL(blob);
 }
 
 export async function deleteMediaBlob(key: string): Promise<void> {

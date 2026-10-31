@@ -12,6 +12,7 @@ import {
   INITIAL_RESOURCES,
   INITIAL_CHATS,
 } from "@/lib/seedData";
+import { repairLectureIfNeeded } from "@/lib/emtLectureData";
 
 const LS_KEYS = {
   courses: "azra_alihan_courses_v1",
@@ -31,7 +32,7 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
   if (typeof window === "undefined") {
     return {
       courses: INITIAL_COURSES,
-      lectures: INITIAL_LECTURES,
+      lectures: INITIAL_LECTURES.map((l) => repairLectureIfNeeded(l).lecture),
       resources: INITIAL_RESOURCES,
       chats: INITIAL_CHATS,
     };
@@ -50,12 +51,20 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
       ? JSON.parse(rawLectures)
       : INITIAL_LECTURES;
 
+    let anyRepaired = false;
+    const lectures: Lecture[] = baseLectures.map((lec) => {
+      const { lecture, repaired } = repairLectureIfNeeded(lec);
+      if (repaired) anyRepaired = true;
+      return lecture;
+    });
+
     // Ensure any new seed lectures (e.g. lec-emt-03) and synchronized transcripts are merged
-    const lectures: Lecture[] = [...baseLectures];
-    for (const seedLec of INITIAL_LECTURES) {
+    for (const rawSeed of INITIAL_LECTURES) {
+      const seedLec = repairLectureIfNeeded(rawSeed).lecture;
       const existingIdx = lectures.findIndex((l) => l.id === seedLec.id);
       if (existingIdx === -1) {
         lectures.push(seedLec);
+        anyRepaired = true;
       } else if (
         seedLec.transcript &&
         (!lectures[existingIdx].transcript ||
@@ -64,7 +73,20 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
         lectures[existingIdx] = {
           ...lectures[existingIdx],
           transcript: seedLec.transcript,
+          timeline:
+            lectures[existingIdx].timeline?.length > 0
+              ? lectures[existingIdx].timeline
+              : seedLec.timeline,
+          whiteboardExtractions:
+            lectures[existingIdx].whiteboardExtractions?.length > 0
+              ? lectures[existingIdx].whiteboardExtractions
+              : seedLec.whiteboardExtractions,
+          examAlerts:
+            lectures[existingIdx].examAlerts?.length > 0
+              ? lectures[existingIdx].examAlerts
+              : seedLec.examAlerts,
         };
+        anyRepaired = true;
       }
     }
 
@@ -75,7 +97,7 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
       ? JSON.parse(rawChats)
       : INITIAL_CHATS;
 
-    if (!rawCourses || lectures.length > baseLectures.length) {
+    if (!rawCourses || anyRepaired || lectures.length > baseLectures.length) {
       saveLocalWorkspace({ courses, lectures, resources, chats });
     }
 
@@ -83,7 +105,7 @@ export function loadLocalWorkspace(): WorkspaceSnapshot {
   } catch {
     return {
       courses: INITIAL_COURSES,
-      lectures: INITIAL_LECTURES,
+      lectures: INITIAL_LECTURES.map((l) => repairLectureIfNeeded(l).lecture),
       resources: INITIAL_RESOURCES,
       chats: INITIAL_CHATS,
     };
