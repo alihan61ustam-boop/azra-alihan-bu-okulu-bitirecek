@@ -27,6 +27,8 @@ import {
   RefreshCw,
   Loader2,
   BookOpen,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import { ApiKeysConfig, Course, Lecture, TranscriptItem } from "@/types/academic";
 import { LatexFormula, MathMarkdown } from "@/components/MathMarkdown";
@@ -66,7 +68,7 @@ export function LectureNoteViewer({
   onDeleteLecture: (id: string) => void;
   onAskTutor: (promptText: string) => void;
   onAttachMedia?: (lectureId: string, file: File) => void;
-  onUpdateLecture?: (updated: Lecture) => void;
+  onUpdateLecture?: (updated: Lecture, file?: File) => void;
 }) {
   const rawActiveLecture =
     lectures.find((l) => l.id === activeLectureId) || lectures[0];
@@ -84,6 +86,7 @@ export function LectureNoteViewer({
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isTranscriptOpen, setIsTranscriptOpen] = useState<boolean>(true);
+  const [isPlayerFullscreen, setIsPlayerFullscreen] = useState<boolean>(false);
   const [transcriptSearch, setTranscriptSearch] = useState<string>("");
   const [transcriptTab, setTranscriptTab] = useState<"all" | "important">("all");
   const [autoScrollTranscript, setAutoScrollTranscript] = useState<boolean>(true);
@@ -205,11 +208,14 @@ export function LectureNoteViewer({
           onProgress: (stage) => setReprocessStage(stage),
           onPartialTranscript: (items) => setLivePartialTranscript(items),
         });
-        onUpdateLecture?.({
-          ...activeLecture,
-          ...result,
-          isRealAudioTranscript: true,
-        });
+        onUpdateLecture?.(
+          {
+            ...activeLecture,
+            ...result,
+            isRealAudioTranscript: true,
+          },
+          fileToAnalyze
+        );
       }
     } catch (err) {
       setReprocessError(
@@ -221,6 +227,49 @@ export function LectureNoteViewer({
       setReprocessing(false);
       setReprocessStage("");
       setLivePartialTranscript(null);
+    }
+  };
+
+  // Keep player + transcript container fullscreen synchronized (if native <video> fullscreen is triggered, upgrade it to container fullscreen so the transcript stays on the right!)
+  useEffect(() => {
+    const handleFullscreenChange = async () => {
+      const fsEl = document.fullscreenElement;
+      if (fsEl && fsEl === videoRef.current && playerContainerRef.current) {
+        try {
+          await document.exitFullscreen();
+          setIsTranscriptOpen(true);
+          await playerContainerRef.current.requestFullscreen();
+          setIsPlayerFullscreen(true);
+          return;
+        } catch {
+          // fallback
+        }
+      }
+      setIsPlayerFullscreen(Boolean(fsEl));
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  const togglePlayerFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        setIsPlayerFullscreen(false);
+      } else if (playerContainerRef.current) {
+        setIsTranscriptOpen(true);
+        await playerContainerRef.current.requestFullscreen();
+        setIsPlayerFullscreen(true);
+      } else {
+        setIsTranscriptOpen(true);
+        setIsPlayerFullscreen((prev) => !prev);
+      }
+    } catch {
+      setIsTranscriptOpen(true);
+      setIsPlayerFullscreen((prev) => !prev);
     }
   };
 
@@ -449,10 +498,14 @@ export function LectureNoteViewer({
       {/* Media Player & Synchronized Transcript Panel (Google Drive / Vids Style) */}
       <div
         ref={playerContainerRef}
-        className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#050507] shadow-2xl"
+        className={
+          isPlayerFullscreen
+            ? "fixed inset-0 z-50 flex flex-col h-screen w-screen overflow-hidden bg-[#020204]"
+            : "overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#050507] shadow-2xl"
+        }
       >
         {/* Top Header Bar across the player */}
-        <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-zinc-800/80 px-3.5 py-2.5 bg-zinc-950/70">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-zinc-800/80 px-3.5 py-2.5 bg-zinc-950/90 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/20">
               <Video className="h-3.5 w-3.5" />
@@ -478,7 +531,7 @@ export function LectureNoteViewer({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {/* Speed selection */}
             <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
               {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
@@ -518,6 +571,34 @@ export function LectureNoteViewer({
               </span>
             </button>
 
+            {/* Fullscreen with Side-by-Side Transcript Button */}
+            <button
+              type="button"
+              onClick={togglePlayerFullscreen}
+              title={
+                isPlayerFullscreen
+                  ? "Tam Ekrandan Çık (ESC)"
+                  : "Tam Ekran (Video + Yanda Canlı Transkript)"
+              }
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                isPlayerFullscreen
+                  ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-200"
+                  : "border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20"
+              }`}
+            >
+              {isPlayerFullscreen ? (
+                <>
+                  <Minimize2 className="h-3.5 w-3.5" />
+                  <span>Tam Ekrandan Çık</span>
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="h-3.5 w-3.5" />
+                  <span>Tam Ekran + Transkript</span>
+                </>
+              )}
+            </button>
+
             {/* Re-analyze current video button */}
             <button
               type="button"
@@ -544,12 +625,20 @@ export function LectureNoteViewer({
         </div>
 
         {/* Player and Transcript Side-by-Side Area */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 min-h-[360px] divide-y lg:divide-y-0 lg:divide-x divide-zinc-800/80">
+        <div
+          className={`grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-zinc-800/80 ${
+            isPlayerFullscreen
+              ? "flex-1 min-h-0 overflow-hidden"
+              : "min-h-[360px]"
+          }`}
+        >
           {/* Main Player Column (Left) */}
           <div
             className={`${
               isTranscriptOpen ? "lg:col-span-7 xl:col-span-8" : "lg:col-span-12"
-            } p-3 sm:p-4 flex flex-col justify-between space-y-3 bg-[#020204]`}
+            } p-3 sm:p-4 flex flex-col justify-between space-y-3 bg-[#020204] ${
+              isPlayerFullscreen ? "h-full min-h-0 overflow-hidden" : ""
+            }`}
           >
             {mediaObjectUrl ? (
               activeLecture.sourceType === "audio" ||
@@ -575,16 +664,52 @@ export function LectureNoteViewer({
                   />
                 </div>
               ) : (
-                <div className="relative rounded-xl overflow-hidden bg-black border border-zinc-800/80 flex items-center justify-center shadow-inner">
+                <div
+                  className={`group relative rounded-xl overflow-hidden bg-black border border-zinc-800/80 flex items-center justify-center shadow-inner ${
+                    isPlayerFullscreen ? "flex-1 min-h-0" : ""
+                  }`}
+                >
                   <video
                     ref={videoRef}
                     controls
+                    controlsList="nofullscreen"
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      togglePlayerFullscreen();
+                    }}
                     src={mediaObjectUrl}
                     onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => setIsPlaying(false)}
-                    className="max-h-[460px] w-full object-contain"
+                    className={
+                      isPlayerFullscreen
+                        ? "h-full max-h-[calc(100vh-125px)] w-full object-contain"
+                        : "max-h-[460px] w-full object-contain"
+                    }
                   />
+                  {/* Floating Fullscreen + Side Transcript Toggle on Video Corner */}
+                  <button
+                    type="button"
+                    onClick={togglePlayerFullscreen}
+                    title={
+                      isPlayerFullscreen
+                        ? "Tam Ekrandan Çık"
+                        : "Videoyu Yandaki Konuşmalarla Birlikte Tam Ekran Yap"
+                    }
+                    className="absolute top-3 right-3 z-10 inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/80 bg-zinc-950/85 px-2.5 py-1.5 text-[11px] font-semibold text-zinc-100 opacity-90 backdrop-blur-md transition hover:border-sky-400 hover:bg-zinc-900 hover:text-sky-300 cursor-pointer shadow-lg"
+                  >
+                    {isPlayerFullscreen ? (
+                      <>
+                        <Minimize2 className="h-3.5 w-3.5 text-emerald-400" />
+                        <span>Küçült</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="h-3.5 w-3.5 text-sky-400" />
+                        <span>Tam Ekran + Yanda Konuşmalar</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               )
             ) : (
@@ -664,7 +789,11 @@ export function LectureNoteViewer({
 
           {/* Dedicated Synchronized Transcript Column (Right) */}
           {isTranscriptOpen && (
-            <div className="lg:col-span-5 xl:col-span-4 flex flex-col bg-[#08080b]">
+            <div
+              className={`lg:col-span-5 xl:col-span-4 flex flex-col bg-[#08080b] ${
+                isPlayerFullscreen ? "h-full min-h-0 overflow-hidden" : ""
+              }`}
+            >
               {/* Transcript Header (Matching Google Drive / Vids screenshot) */}
               <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-800/80 bg-zinc-950/90">
                 <div className="flex items-center gap-2">
@@ -763,7 +892,11 @@ export function LectureNoteViewer({
               {/* Scrollable Sentence List */}
               <div
                 ref={transcriptContainerRef}
-                className="flex-1 overflow-y-auto max-h-[440px] p-2 space-y-1 text-xs divide-y divide-zinc-900"
+                className={`flex-1 overflow-y-auto p-2 space-y-1 text-xs divide-y divide-zinc-900 ${
+                  isPlayerFullscreen
+                    ? "max-h-[calc(100vh-165px)]"
+                    : "max-h-[440px]"
+                }`}
               >
                 {filteredTranscript.length === 0 ? (
                   <div className="py-12 px-4 text-center text-zinc-400 text-xs space-y-2">

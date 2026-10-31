@@ -1,14 +1,21 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
+  Check,
+  Cloud,
   Columns2,
+  Copy,
+  Database,
+  ExternalLink,
   Globe,
   Heart,
   KeyRound,
+  Loader2,
   Menu,
   MessageSquareText,
+  RefreshCw,
   Upload,
   X,
 } from "lucide-react";
@@ -27,15 +34,26 @@ import {
   INITIAL_RESOURCES,
 } from "@/lib/seedData";
 import {
+  clearCourseChatInSupabase,
+  deleteCourseFromSupabase,
+  deleteLectureFromSupabase,
+  deleteResourceFromSupabase,
+  fetchWorkspaceFromSupabase,
   getSupabaseClient,
   loadLocalWorkspace,
+  pushEntireWorkspaceToSupabase,
   resetLocalWorkspaceToDefaults,
   saveLocalWorkspace,
+  SUPABASE_QUICK_SETUP_SQL,
+  syncChatMessageToSupabase,
   syncCourseToSupabase,
   syncLectureToSupabase,
+  syncResourceToSupabase,
 } from "@/lib/hybridStore";
 import {
   BUILTIN_GEMINI_KEY,
+  BUILTIN_SUPABASE_ANON_KEY,
+  BUILTIN_SUPABASE_URL,
   loadEncryptedApiKeys,
   saveEncryptedApiKeys,
 } from "@/lib/cryptoStorage";
@@ -67,6 +85,13 @@ export default function HomePage() {
   const [chats, setChats] =
     useState<Record<string, ChatMessage[]>>(INITIAL_CHATS);
 
+  // Cloud Sync State
+  const [cloudStatus, setCloudStatus] = useState<
+    "syncing" | "connected" | "needs_schema" | "offline"
+  >("syncing");
+  const [sqlCopied, setSqlCopied] = useState(false);
+  const [pushingSchemaSync, setPushingSchemaSync] = useState(false);
+
   // Active Navigation State
   const [activeCourseId, setActiveCourseId] = useState<string>(
     INITIAL_COURSES[0].id
@@ -89,14 +114,45 @@ export default function HomePage() {
   // API & Agency Tool Configs
   const [apiKeys, setApiKeys] = useState<ApiKeysConfig>({
     geminiApiKey: BUILTIN_GEMINI_KEY,
-    geminiModel: "gemini-3-flash-preview",
-    supabaseUrl: "",
-    supabaseAnonKey: "",
+    geminiModel: "gemini-3.5-flash-lite",
+    supabaseUrl: BUILTIN_SUPABASE_URL,
+    supabaseAnonKey: BUILTIN_SUPABASE_ANON_KEY,
     wolframAppId: "",
   });
   const [toolConfigs, setToolConfigs] = useState<ExternalToolConfig[]>([]);
 
-  // Initial client hydration
+  const realtimeChannelRef = useRef< ReturnType<NonNullable<ReturnType<typeof getSupabaseClient>>["channel"]> | null >(null);
+
+  const broadcastWorkspaceChange = useCallback(() => {
+    try {
+      realtimeChannelRef.current?.send({
+        type: "broadcast",
+        event: "workspace_updated",
+        payload: { ts: Date.now() },
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const syncFromCloud = useCallback(
+    async (keysOverride?: ApiKeysConfig) => {
+      const sb = getSupabaseClient(keysOverride || apiKeys);
+      const localSnap = loadLocalWorkspace();
+      const res = await fetchWorkspaceFromSupabase(sb, localSnap);
+      setCloudStatus(res.status);
+      if (res.status === "connected") {
+        setCourses(res.snapshot.courses);
+        setLectures(res.snapshot.lectures);
+        setResources(res.snapshot.resources);
+        setChats(res.snapshot.chats);
+      }
+      return res.status;
+    },
+    [apiKeys]
+  );
+
+  // Initial client hydration + Supabase cloud fetch
   useEffect(() => {
     const snap = loadLocalWorkspace();
     setCourses(snap.courses);
@@ -111,13 +167,55 @@ export default function HomePage() {
     }
 
     setToolConfigs(agentRegistry.loadSavedToolConfigs());
-    loadEncryptedApiKeys().then((loaded) => {
+    loadEncryptedApiKeys().then(async (loaded) => {
       setApiKeys(loaded);
+      const sb = getSupabaseClient(loaded);
+      const res = await fetchWorkspaceFromSupabase(sb, snap);
+      setCloudStatus(res.status);
+      if (res.status === "connected") {
+        setCourses(res.snapshot.courses);
+        setLectures(res.snapshot.lectures);
+        setResources(res.snapshot.resources);
+        setChats(res.snapshot.chats);
+      }
     });
     setHydrated(true);
   }, []);
 
-  // Persist workspace whenever data changes
+  // Realtime subscription + periodic cloud sync across different IPs/devices
+  useEffect(() => {
+    if (!hydrated) return;
+    const sb = getSupabaseClient(apiKeys);
+    if (!sb) return;
+
+    const channel = sb
+      .channel("azra-alihan-shared-db")
+      .on("broadcast", { event: "workspace_updated" }, () => {
+        syncFromCloud();
+      })
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public" },
+        () => {
+          syncFromCloud();
+        }
+      )
+      .subscribe();
+
+    realtimeChannelRef.current = channel;
+
+    const interval = setInterval(() => {
+      syncFromCloud();
+    }, 15000);
+
+    return () => {
+      clearInterval(interval);
+      sb.removeChannel(channel);
+      realtimeChannelRef.current = null;
+    };
+  }, [hydrated, apiKeys, syncFromCloud]);
+
+  // Persist workspace locally whenever data changes
   useEffect(() => {
     if (!hydrated) return;
     saveLocalWorkspace({ courses, lectures, resources, chats });
@@ -154,27 +252,29 @@ export default function HomePage() {
       id: `course-${Date.now()}`,
       createdAt: new Date().toISOString(),
     };
+    const initMsg: ChatMessage = {
+      id: `msg-init-${newCourse.id}`,
+      courseId: newCourse.id,
+      role: "assistant",
+      content: `Merhaba Azra! Yeni açtığın **${newCourse.title} (${newCourse.code})** çalışma odasının özel AI eğitmeniyim. İlk ders videonu yükleyebilir veya doğrudan müfredat konularından soru sorabilirsin!`,
+      createdAt: new Date().toISOString(),
+    };
+
     setCourses((prev) => [...prev, newCourse]);
     setChats((prev) => ({
       ...prev,
-      [newCourse.id]: [
-        {
-          id: `msg-init-${newCourse.id}`,
-          courseId: newCourse.id,
-          role: "assistant",
-          content: `Merhaba Azra! Yeni açtığın **${newCourse.title} (${newCourse.code})** çalışma odasının özel AI eğitmeniyim. İlk ders videonu yükleyebilir veya doğrudan müfredat konularından soru sorabilirsin!`,
-          createdAt: new Date().toISOString(),
-        },
-      ],
+      [newCourse.id]: [initMsg],
     }));
     setActiveCourseId(newCourse.id);
     setActiveLectureId("");
 
     const sb = getSupabaseClient(apiKeys);
     await syncCourseToSupabase(sb, newCourse);
+    await syncChatMessageToSupabase(sb, initMsg);
+    broadcastWorkspaceChange();
   };
 
-  const handleDeleteCourse = (courseId: string) => {
+  const handleDeleteCourse = async (courseId: string) => {
     if (courses.length <= 1) return;
     const remaining = courses.filter((c) => c.id !== courseId);
     setCourses(remaining);
@@ -183,6 +283,9 @@ export default function HomePage() {
     if (activeCourseId === courseId) {
       handleSelectCourse(remaining[0].id);
     }
+    const sb = getSupabaseClient(apiKeys);
+    await deleteCourseFromSupabase(sb, courseId);
+    broadcastWorkspaceChange();
   };
 
   const handleLectureCreated = async (newLecture: Lecture, rawFile?: File) => {
@@ -195,6 +298,7 @@ export default function HomePage() {
     setLectures((prev) => [finalized, ...prev]);
     setActiveLectureId(finalized.id);
     setActiveTab("notes");
+    broadcastWorkspaceChange();
   };
 
   const handleDeleteLecture = async (lectureId: string) => {
@@ -206,32 +310,66 @@ export default function HomePage() {
     setLectures(next);
     const nextForCourse = next.filter((l) => l.courseId === activeCourse.id);
     setActiveLectureId(nextForCourse[0]?.id || "");
+
+    const sb = getSupabaseClient(apiKeys);
+    await deleteLectureFromSupabase(sb, lectureId);
+    broadcastWorkspaceChange();
   };
 
   const handleAttachMediaToLecture = async (lectureId: string, file: File) => {
+    let targetLecture: Lecture | undefined;
     setLectures((prev) =>
-      prev.map((l) =>
-        l.id === lectureId
-          ? {
-              ...l,
-              mediaBlobKey: `blob-${lectureId}`,
-              mediaMimeType: file.type || "video/mp4",
-              sourceType: file.type.startsWith("audio") ? "audio" : "video",
-            }
-          : l
-      )
+      prev.map((l) => {
+        if (l.id === lectureId) {
+          targetLecture = {
+            ...l,
+            mediaBlobKey: `blob-${lectureId}`,
+            mediaMimeType: file.type || "video/mp4",
+            sourceType: file.type.startsWith("audio") ? "audio" : "video",
+          };
+          return targetLecture;
+        }
+        return l;
+      })
     );
+
+    if (targetLecture) {
+      const sb = getSupabaseClient(apiKeys);
+      const cloudUrl = await syncLectureToSupabase(sb, targetLecture, file);
+      if (cloudUrl) {
+        setLectures((prev) =>
+          prev.map((l) =>
+            l.id === lectureId ? { ...l, mediaUrl: cloudUrl } : l
+          )
+        );
+      }
+      broadcastWorkspaceChange();
+    }
   };
 
-  const handleUpdateLecture = useCallback((updated: Lecture) => {
-    setLectures((prev) =>
-      prev.map((l) => (l.id === updated.id ? updated : l))
-    );
-  }, []);
+  const handleUpdateLecture = useCallback(
+    async (updated: Lecture, file?: File) => {
+      setLectures((prev) =>
+        prev.map((l) => (l.id === updated.id ? updated : l))
+      );
+      const sb = getSupabaseClient(apiKeys);
+      const cloudUrl = await syncLectureToSupabase(sb, updated, file);
+      if (cloudUrl && cloudUrl !== updated.mediaUrl) {
+        setLectures((prev) =>
+          prev.map((l) =>
+            l.id === updated.id ? { ...l, mediaUrl: cloudUrl } : l
+          )
+        );
+      }
+      broadcastWorkspaceChange();
+    },
+    [apiKeys, broadcastWorkspaceChange]
+  );
 
   const handleSaveApiKeys = async (cfg: ApiKeysConfig) => {
     setApiKeys(cfg);
     await saveEncryptedApiKeys(cfg);
+    await syncFromCloud(cfg);
   };
 
   const handleSaveToolConfigs = (tools: ExternalToolConfig[]) => {
@@ -239,7 +377,7 @@ export default function HomePage() {
     agentRegistry.saveToolConfigs(tools);
   };
 
-  const handleResetSamples = () => {
+  const handleResetSamples = async () => {
     const snap = resetLocalWorkspaceToDefaults();
     setCourses(snap.courses);
     setLectures(snap.lectures);
@@ -248,6 +386,37 @@ export default function HomePage() {
     setActiveCourseId(snap.courses[0].id);
     setActiveLectureId(snap.lectures[0].id);
     setApiModalOpen(false);
+    const sb = getSupabaseClient(apiKeys);
+    await pushEntireWorkspaceToSupabase(sb, snap);
+    broadcastWorkspaceChange();
+  };
+
+  const handleCopySqlAndOpenDashboard = () => {
+    navigator.clipboard?.writeText(SUPABASE_QUICK_SETUP_SQL);
+    setSqlCopied(true);
+    setTimeout(() => setSqlCopied(false), 4000);
+    window.open(
+      "https://supabase.com/dashboard/project/yfblbiqrstnedcnqnxfw/sql/new",
+      "_blank",
+      "noopener,noreferrer"
+    );
+  };
+
+  const handleCompleteSchemaAndPush = async () => {
+    setPushingSchemaSync(true);
+    try {
+      const sb = getSupabaseClient(apiKeys);
+      await pushEntireWorkspaceToSupabase(sb, {
+        courses,
+        lectures,
+        resources,
+        chats,
+      });
+      await syncFromCloud();
+      broadcastWorkspaceChange();
+    } finally {
+      setPushingSchemaSync(false);
+    }
   };
 
   const handleAskTutorFromNotes = useCallback(
@@ -373,6 +542,29 @@ export default function HomePage() {
 
           {/* Right Header Controls */}
           <div className="flex items-center gap-2">
+            {/* Supabase Shared Cloud Status Badge */}
+            <button
+              type="button"
+              onClick={() => syncFromCloud()}
+              title="Farklı IP ve cihazlarla ortak Supabase veritabanını şimdi senkronize et"
+              className={`hidden sm:inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-semibold transition cursor-pointer ${
+                cloudStatus === "connected"
+                  ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                  : cloudStatus === "needs_schema"
+                  ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                  : "border-zinc-800 bg-zinc-900 text-zinc-400"
+              }`}
+            >
+              <Cloud className="h-3.5 w-3.5" />
+              <span>
+                {cloudStatus === "connected"
+                  ? "Ortak DB Aktif"
+                  : cloudStatus === "needs_schema"
+                  ? "Tablo Kurulumu Bekliyor"
+                  : "Bulut Senkron"}
+              </span>
+            </button>
+
             {/* Workspace Tabs */}
             <div className="flex items-center rounded-xl border border-zinc-800 bg-zinc-900/70 p-0.5">
               <button
@@ -472,6 +664,52 @@ export default function HomePage() {
           </div>
         </header>
 
+        {/* 1-Click Supabase Table Setup Banner (Only shown if tables haven't been created in yfblbiqrstnedcnqnxfw yet) */}
+        {cloudStatus === "needs_schema" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-100">
+            <div className="flex items-center gap-2">
+              <Database className="h-4 w-4 shrink-0 text-amber-400" />
+              <span>
+                <strong>Supabase Bağlantısı Hazır (`yfblbiqrstnedcnqnxfw`):</strong>{" "}
+                Farklı IP&apos;lerin aynı tabloları görmesi için SQL kurulum kodunu Supabase SQL Editor&apos;e yapıştırıp <strong>Run</strong> tuşuna basın:
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleCopySqlAndOpenDashboard}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-amber-300 cursor-pointer transition"
+              >
+                {sqlCopied ? (
+                  <>
+                    <Check className="h-3.5 w-3.5" />
+                    <span>SQL Kopyalandı! (SQL Editor Açıldı)</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>1. SQL Kopyala &amp; Supabase SQL Editor&apos;ü Aç</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                disabled={pushingSchemaSync}
+                onClick={handleCompleteSchemaAndPush}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/50 bg-emerald-500/20 px-3 py-1.5 text-xs font-bold text-emerald-200 hover:bg-emerald-500/30 disabled:opacity-50 cursor-pointer transition"
+              >
+                {pushingSchemaSync ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                <span>2. Run Yaptım, Şimdi Bağlan &amp; Verileri Aktar</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Split-View / Tabbed Body */}
         <main className="flex min-h-0 flex-1 overflow-hidden">
           {/* Left / Main Pane */}
@@ -486,19 +724,35 @@ export default function HomePage() {
                 resources={courseResources}
                 apiKeys={apiKeys}
                 toolConfigs={toolConfigs}
-                onAddResource={(res) => setResources((prev) => [res, ...prev])}
-                onDeleteResource={(id) =>
-                  setResources((prev) => prev.filter((r) => r.id !== id))
-                }
-                onUpdateCourseSyllabus={(newSyllabus) =>
+                onAddResource={async (res) => {
+                  setResources((prev) => [res, ...prev]);
+                  const sb = getSupabaseClient(apiKeys);
+                  await syncResourceToSupabase(sb, res);
+                  broadcastWorkspaceChange();
+                }}
+                onDeleteResource={async (id) => {
+                  setResources((prev) => prev.filter((r) => r.id !== id));
+                  const sb = getSupabaseClient(apiKeys);
+                  await deleteResourceFromSupabase(sb, id);
+                  broadcastWorkspaceChange();
+                }}
+                onUpdateCourseSyllabus={async (newSyllabus) => {
+                  let updatedCourse: Course | undefined;
                   setCourses((prev) =>
-                    prev.map((c) =>
-                      c.id === activeCourse.id
-                        ? { ...c, syllabus: newSyllabus }
-                        : c
-                    )
-                  )
-                }
+                    prev.map((c) => {
+                      if (c.id === activeCourse.id) {
+                        updatedCourse = { ...c, syllabus: newSyllabus };
+                        return updatedCourse;
+                      }
+                      return c;
+                    })
+                  );
+                  if (updatedCourse) {
+                    const sb = getSupabaseClient(apiKeys);
+                    await syncCourseToSupabase(sb, updatedCourse);
+                    broadcastWorkspaceChange();
+                  }
+                }}
               />
             ) : (
               <LectureNoteViewer
@@ -534,12 +788,21 @@ export default function HomePage() {
               apiKeys={apiKeys}
               externalTriggerPrompt={tutorTriggerPrompt}
               onClearExternalTrigger={() => setTutorTriggerPrompt(null)}
-              onUpdateMessages={(newMsgs) =>
+              onUpdateMessages={async (newMsgs) => {
                 setChats((prev) => ({
                   ...prev,
                   [activeCourse.id]: newMsgs,
-                }))
-              }
+                }));
+                const sb = getSupabaseClient(apiKeys);
+                if (newMsgs.length <= 1) {
+                  await clearCourseChatInSupabase(sb, activeCourse.id);
+                }
+                const lastMsg = newMsgs[newMsgs.length - 1];
+                if (lastMsg && !lastMsg.content.endsWith("...")) {
+                  await syncChatMessageToSupabase(sb, lastMsg);
+                  broadcastWorkspaceChange();
+                }
+              }}
               onOpenApiSettings={() => setApiModalOpen(true)}
             />
           </div>

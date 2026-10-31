@@ -15,12 +15,15 @@ function getBuiltinKey(): string {
 }
 
 export const BUILTIN_GEMINI_KEY = getBuiltinKey();
+export const BUILTIN_SUPABASE_URL = "https://yfblbiqrstnedcnqnxfw.supabase.co";
+export const BUILTIN_SUPABASE_ANON_KEY =
+  "sb_publishable_s0sUyidbcl1f08RUDCnxBg_zW8SRSe8";
 
 const DEFAULT_KEYS: ApiKeysConfig = {
   geminiApiKey: BUILTIN_GEMINI_KEY,
   geminiModel: "gemini-3.5-flash-lite",
-  supabaseUrl: "",
-  supabaseAnonKey: "",
+  supabaseUrl: BUILTIN_SUPABASE_URL,
+  supabaseAnonKey: BUILTIN_SUPABASE_ANON_KEY,
   wolframAppId: "",
 };
 
@@ -130,6 +133,9 @@ export async function loadEncryptedApiKeys(): Promise<ApiKeysConfig> {
         ...decoded,
         geminiApiKey: decoded.geminiApiKey?.trim() || BUILTIN_GEMINI_KEY,
         geminiModel: sanitizeModel(decoded.geminiModel),
+        supabaseUrl: decoded.supabaseUrl?.trim() || BUILTIN_SUPABASE_URL,
+        supabaseAnonKey:
+          decoded.supabaseAnonKey?.trim() || BUILTIN_SUPABASE_ANON_KEY,
       };
     }
     const fallbackDecoded = JSON.parse(decodeURIComponent(atob(raw)));
@@ -138,6 +144,9 @@ export async function loadEncryptedApiKeys(): Promise<ApiKeysConfig> {
       ...fallbackDecoded,
       geminiApiKey: fallbackDecoded.geminiApiKey?.trim() || BUILTIN_GEMINI_KEY,
       geminiModel: sanitizeModel(fallbackDecoded.geminiModel),
+      supabaseUrl: fallbackDecoded.supabaseUrl?.trim() || BUILTIN_SUPABASE_URL,
+      supabaseAnonKey:
+        fallbackDecoded.supabaseAnonKey?.trim() || BUILTIN_SUPABASE_ANON_KEY,
     };
   } catch {
     return DEFAULT_KEYS;

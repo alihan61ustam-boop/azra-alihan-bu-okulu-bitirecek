@@ -37,8 +37,13 @@ create table if not exists public.lectures (
   exam_alerts jsonb not null default '[]'::jsonb,
   concept_map jsonb not null default '[]'::jsonb,
   practice_questions jsonb not null default '[]'::jsonb,
+  transcript jsonb not null default '[]'::jsonb,
+  is_real_audio_transcript boolean not null default false,
   created_at timestamptz not null default now()
 );
+
+alter table public.lectures add column if not exists transcript jsonb not null default '[]'::jsonb;
+alter table public.lectures add column if not exists is_real_audio_transcript boolean not null default false;
 
 create index if not exists idx_lectures_course_id on public.lectures(course_id);
 
@@ -160,3 +165,11 @@ create policy "Public read course-assets" on storage.objects
 drop policy if exists "Public upload course-assets" on storage.objects;
 create policy "Public upload course-assets" on storage.objects
   for insert with check (bucket_id = 'course-assets');
+
+drop policy if exists "Public update course-assets" on storage.objects;
+create policy "Public update course-assets" on storage.objects
+  for update using (bucket_id = 'course-assets');
+
+drop policy if exists "Public delete course-assets" on storage.objects;
+create policy "Public delete course-assets" on storage.objects
+  for delete using (bucket_id = 'course-assets');
