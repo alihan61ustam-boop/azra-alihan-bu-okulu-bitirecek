@@ -108,18 +108,44 @@ export function LectureNoteViewer({
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const directVideoInputRef = useRef<HTMLInputElement>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
+  const hydratedMediaIdRef = useRef<string>("");
+  const currentBlobUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
-    let revokedUrl: string | null = null;
+    const lectureId = activeLecture?.id || "";
+    const blobKey = activeLecture?.mediaBlobKey || "";
+    const remoteUrl = activeLecture?.mediaUrl || "";
+    const mediaIdentity = blobKey
+      ? `${lectureId}::blob::${blobKey}`
+      : `${lectureId}::url::${remoteUrl}`;
+
+    if (hydratedMediaIdRef.current === mediaIdentity) {
+      return;
+    }
+    hydratedMediaIdRef.current = mediaIdentity;
+
+    let cancelled = false;
     async function hydrateMedia() {
       setActiveTimestamp(null);
+      if (
+        currentBlobUrlRef.current &&
+        currentBlobUrlRef.current.startsWith("blob:")
+      ) {
+        URL.revokeObjectURL(currentBlobUrlRef.current);
+        currentBlobUrlRef.current = null;
+      }
+
       if (!activeLecture) {
         setMediaObjectUrl(null);
         return;
       }
       if (activeLecture.mediaBlobKey) {
         const objUrl = await loadMediaObjectUrl(activeLecture.mediaBlobKey);
-        revokedUrl = objUrl;
+        if (cancelled) {
+          if (objUrl && objUrl.startsWith("blob:")) URL.revokeObjectURL(objUrl);
+          return;
+        }
+        currentBlobUrlRef.current = objUrl;
         setMediaObjectUrl(objUrl);
       } else if (activeLecture.mediaUrl) {
         setMediaObjectUrl(activeLecture.mediaUrl);
@@ -129,11 +155,9 @@ export function LectureNoteViewer({
     }
     hydrateMedia();
     return () => {
-      if (revokedUrl && revokedUrl.startsWith("blob:")) {
-        URL.revokeObjectURL(revokedUrl);
-      }
+      cancelled = true;
     };
-  }, [activeLecture]);
+  }, [activeLecture?.id, activeLecture?.mediaBlobKey, activeLecture?.mediaUrl]);
 
   const transcriptItems: TranscriptItem[] = React.useMemo(() => {
     if (
@@ -474,6 +498,8 @@ export function LectureNoteViewer({
           const key = `blob-${activeLecture.id}`;
           await saveMediaBlob(key, file);
           const objUrl = URL.createObjectURL(file);
+          hydratedMediaIdRef.current = `${activeLecture.id}::blob::${key}`;
+          currentBlobUrlRef.current = objUrl;
           setMediaObjectUrl(objUrl);
           onAttachMedia?.(activeLecture.id, file);
           handleReanalyzeCurrentVideo(file);

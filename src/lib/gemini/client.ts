@@ -537,37 +537,63 @@ export function generateFallbackTranscript(
   return items;
 }
 
+function convertPossibleMmssNumber(
+  num: number,
+  chunkDurationSec: number,
+  allRawNumbersInChunk: number[]
+): number {
+  const rounded = Math.round(num);
+  if (rounded >= 100) {
+    const mins = Math.floor(rounded / 100);
+    const secs = rounded % 100;
+    const has60To99 = allRawNumbersInChunk.some((n) => n >= 62 && n <= 98);
+    // If Gemini encoded M:SS as integer MMSS (e.g. 102 for 01:02, 205 for 02:05)
+    if (
+      secs < 60 &&
+      (!has60To99 || rounded > chunkDurationSec + 5) &&
+      mins * 60 + secs <= chunkDurationSec + 10
+    ) {
+      return mins * 60 + secs;
+    }
+  }
+  return rounded;
+}
+
 function parseRelativeSecFromChunkItem(
   rawVal: unknown,
   chunk: WavChunk,
   itemIndex: number,
-  totalItems: number
+  totalItems: number,
+  allRawNumbersInChunk: number[] = []
 ): number {
-  if (typeof rawVal === "number" && Number.isFinite(rawVal)) {
-    // Check if the model returned M.SS format like 1.30
-    const asStr = String(rawVal);
-    if (asStr.includes(".") && rawVal < 10) {
-      const [mPart, sPart] = asStr.split(".");
-      if (sPart && sPart.length === 2 && Number(sPart) < 60 && Number(mPart) > 0) {
-        const mmss = Number(mPart) * 60 + Number(sPart);
-        if (mmss <= chunk.durationSec + 5) return chunk.startSec + mmss;
-      }
-    }
-    if (rawVal >= chunk.startSec && chunk.startSec >= 200 && rawVal <= chunk.endSec + 10) {
-      return Math.round(rawVal);
-    }
-    return chunk.startSec + Math.max(0, Math.min(chunk.durationSec, Math.round(rawVal)));
-  }
-
   if (typeof rawVal === "string") {
     const trimmed = rawVal.trim();
     if (trimmed.includes(":")) {
-      const parts = trimmed.split(":").map((p) => parseInt(p, 10));
+      const parts = trimmed.split(":").map((p) => parseInt(p.trim(), 10));
       if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
         const parsedSec = parts[0] * 60 + parts[1];
         if (
           parsedSec >= chunk.startSec &&
-          chunk.startSec >= 200 &&
+          chunk.startSec >= 120 &&
+          parsedSec <= chunk.endSec + 10
+        ) {
+          return parsedSec;
+        }
+        return (
+          chunk.startSec +
+          Math.max(0, Math.min(chunk.durationSec, parsedSec))
+        );
+      }
+      if (
+        parts.length === 3 &&
+        !isNaN(parts[0]) &&
+        !isNaN(parts[1]) &&
+        !isNaN(parts[2])
+      ) {
+        const parsedSec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (
+          parsedSec >= chunk.startSec &&
+          chunk.startSec >= 120 &&
           parsedSec <= chunk.endSec + 10
         ) {
           return parsedSec;
@@ -580,11 +606,46 @@ function parseRelativeSecFromChunkItem(
     }
     const num = parseFloat(trimmed);
     if (!isNaN(num)) {
-      if (num >= chunk.startSec && chunk.startSec >= 200 && num <= chunk.endSec + 10) {
-        return Math.round(num);
-      }
-      return chunk.startSec + Math.max(0, Math.min(chunk.durationSec, Math.round(num)));
+      return parseRelativeSecFromChunkItem(
+        num,
+        chunk,
+        itemIndex,
+        totalItems,
+        allRawNumbersInChunk
+      );
     }
+  }
+
+  if (typeof rawVal === "number" && Number.isFinite(rawVal)) {
+    const asStr = String(rawVal);
+    if (asStr.includes(".") && rawVal < 10) {
+      const [mPart, sPart] = asStr.split(".");
+      if (
+        sPart &&
+        sPart.length === 2 &&
+        Number(sPart) < 60 &&
+        Number(mPart) > 0
+      ) {
+        const mmss = Number(mPart) * 60 + Number(sPart);
+        if (mmss <= chunk.durationSec + 5) return chunk.startSec + mmss;
+      }
+    }
+    const converted = convertPossibleMmssNumber(
+      rawVal,
+      chunk.durationSec,
+      allRawNumbersInChunk
+    );
+    if (
+      converted >= chunk.startSec &&
+      chunk.startSec >= 180 &&
+      converted <= chunk.endSec + 10
+    ) {
+      return Math.round(converted);
+    }
+    return (
+      chunk.startSec +
+      Math.max(0, Math.min(chunk.durationSec, Math.round(converted)))
+    );
   }
 
   // Proportional fallback within the chunk if sec is missing
@@ -597,16 +658,19 @@ async function transcribeSingleAudioChunk(
   chunk: WavChunk,
   nowId: number
 ): Promise<TranscriptItem[]> {
-  const prompt = `Bu ${chunk.durationSec} saniyelik gerçek ders ses kaydını dikkatle dinle.
+  const maxMmSs = formatSeconds(chunk.durationSec);
+  const prompt = `Bu ${chunk.durationSec} saniyelik (${maxMmSs} uzunluğundaki) gerçek ders ses kaydını dikkatle dinle.
 GÖREVİN:
 Ses kaydında hocanın ağzından çıkan GERÇEK SÖZLERİ BİREBİR (kelimesi kelimesine, hiçbir şeyi özetlemeden, değiştirmeden ve uydurmadan) Google Drive video transkripti gibi her 4-5 saniyede bir zaman damgalı alt yazı satırları olarak JSON dizisi halinde döndür.
 KESİN KURALLAR:
 1. SADECE ses kaydında gerçekten duyduğun sözleri yaz. Asla ses kaydında olmayan bir cümle veya şablon uydurma!
-2. "sec" alanı bu ses kaydının başından (0. saniyeden) itibaren geçen TAM SAYI saniyedir (0 ile ${chunk.durationSec} arasında sayı, örn: 0, 4, 9, 14, 19, 25, 65, 120...).
-3. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
+2. "time" alanı bu ses parçasının başından ("00:00") sonuna ("${maxMmSs}") kadar geçen süreyi "DD:SS" ("MM:SS") formatında göstermelidir (örnek: "00:00", "00:05", "00:12", "00:58", "01:02", "01:15"). Dikkat: 1 dakika 2 saniyeyi kesinlikle "01:02" (veya sec: 62) olarak yaz, asla 102 yazma!
+3. "sec" alanı "time" değerinin saniye karşılığıdır (örnek: "01:02" için sec: 62).
+4. Her satır 5-9 kelimelik doğal konuşma parçası olsun (cümle devam ediyorsa sonuna ... koyabilirsin).
 JSON Dizisi Şeması:
 [
   {
+    "time": "00:00",
     "sec": 0,
     "text": "Ses kaydında duyulan birebir gerçek sözler...",
     "isImportant": false,
@@ -663,15 +727,24 @@ JSON Dizisi Şeması:
           : [];
 
         if (arr.length > 0) {
+          const allRawNums = arr
+            .map((it) => Number(it.sec ?? it.seconds ?? it.offsetSec))
+            .filter((n) => Number.isFinite(n));
+
           return arr
             .map((item, idx) => {
               const rawSec =
-                item.sec ?? item.seconds ?? item.offsetSec ?? item.timestamp;
+                item.time ??
+                item.timestamp ??
+                item.sec ??
+                item.seconds ??
+                item.offsetSec;
               const absSec = parseRelativeSecFromChunkItem(
                 rawSec,
                 chunk,
                 idx,
-                arr.length
+                arr.length,
+                allRawNums
               );
               const text = String(item.text || "").trim();
               const lower = text.toLowerCase();
@@ -835,7 +908,7 @@ export async function processLectureMultimodal(
     try {
       const { chunks, totalDurationSec } = await extractWavChunksFromMediaBlob(
         file,
-        240,
+        120,
         6000
       );
       if (totalDurationSec > 0) {
@@ -843,7 +916,7 @@ export async function processLectureMultimodal(
       }
 
       const accumulated: TranscriptItem[] = [];
-      const BATCH_SIZE = 3;
+      const BATCH_SIZE = 4;
 
       for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
         const batch = chunks.slice(i, i + BATCH_SIZE);

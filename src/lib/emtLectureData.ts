@@ -25,6 +25,69 @@ export function formatSecToTimestamp(sec: number): string {
 }
 
 /**
+ * Detects and repairs the "MMSS-as-seconds" timestamp shift inside 240s chunks
+ * (e.g., where 1:02 was returned as integer 102 and formatted as 01:42 instead of 01:02,
+ * shifting all subsequent lines in that 4-minute chunk by +40s / +80s until 04:00).
+ */
+export function fixMmssShiftedTranscript(
+  rawItems: TranscriptItem[]
+): { items: TranscriptItem[]; changed: boolean } {
+  if (!rawItems || rawItems.length === 0) {
+    return { items: [], changed: false };
+  }
+
+  const sorted = [...rawItems].sort((a, b) => a.seconds - b.seconds);
+  const maxSec = sorted[sorted.length - 1]?.seconds || 0;
+  const numChunks = Math.max(1, Math.ceil((maxSec + 1) / 240));
+  let anyChanged = false;
+
+  const result: TranscriptItem[] = sorted.map((item) => ({ ...item }));
+
+  for (let c = 0; c < numChunks; c++) {
+    const chunkStart = c * 240;
+    const chunkEnd = (c + 1) * 240;
+    const indices: number[] = [];
+    for (let i = 0; i < result.length; i++) {
+      if (result[i].seconds >= chunkStart && result[i].seconds < chunkEnd) {
+        indices.push(i);
+      }
+    }
+    if (indices.length < 2) continue;
+
+    // Check if there is a sudden MMSS jump across 60..99 (e.g. from <62 directly to >=100)
+    const relSecs = indices.map((idx) => result[idx].seconds - chunkStart);
+    const hasItemsIn62To98 = relSecs.some((r) => r >= 62 && r <= 98);
+    const hasItems100Plus = relSecs.some((r) => r >= 100);
+
+    if (!hasItemsIn62To98 && hasItems100Plus) {
+      anyChanged = true;
+      let prevRel = 0;
+      for (const idx of indices) {
+        const rel = result[idx].seconds - chunkStart;
+        let fixedRel = rel;
+        if (rel >= 200) {
+          fixedRel = rel - 80;
+        } else if (rel >= 100) {
+          fixedRel = rel - 40;
+        }
+        if (fixedRel <= prevRel && prevRel > 0) {
+          fixedRel = prevRel + 2;
+        }
+        prevRel = fixedRel;
+        const newAbs = chunkStart + Math.max(0, fixedRel);
+        result[idx] = {
+          ...result[idx],
+          seconds: newAbs,
+          timestamp: formatSecToTimestamp(newAbs),
+        };
+      }
+    }
+  }
+
+  return { items: result, changed: anyChanged };
+}
+
+/**
  * Formats real transcribed items into Google-Drive-style 4-5 second (6-8 word) lines
  * WITHOUT ever inventing or replacing any text. Only subdivides long spoken sentences
  * from the actual transcript across their real timestamp interval.
@@ -34,7 +97,9 @@ export function formatRealTranscriptToGoogleDriveStyle(
 ): TranscriptItem[] {
   if (!rawItems || rawItems.length === 0) return [];
 
-  const sorted = [...rawItems]
+  const { items: mmssFixed } = fixMmssShiftedTranscript(rawItems);
+
+  const sorted = [...mmssFixed]
     .filter((item) => item.text && item.text.trim().length > 0)
     .sort((a, b) => a.seconds - b.seconds);
 
@@ -46,8 +111,8 @@ export function formatRealTranscriptToGoogleDriveStyle(
     const nextSec =
       i + 1 < sorted.length
         ? Math.max(item.seconds + 3, sorted[i + 1].seconds)
-        : item.seconds + 8;
-    const gap = Math.max(3, nextSec - item.seconds);
+        : item.seconds + 6;
+    const gap = Math.min(18, Math.max(3, nextSec - item.seconds));
     const words = item.text.trim().split(/\s+/);
     const CHUNK_WORDS = 7;
 
@@ -88,16 +153,13 @@ export function formatRealTranscriptToGoogleDriveStyle(
 
 /**
  * Does NOT overwrite lectures with any fake template.
- * Only clears out any previously injected template on user-uploaded videos
- * so that the real audio transcription engine can transcribe the actual video file.
+ * 1) Clears out any old static template on user-uploaded videos.
+ * 2) Repairs MMSS-shifted timestamps (e.g. 01:42 -> 01:02) on already-transcribed lectures.
  */
 export function repairLectureIfNeeded(lec: Lecture): {
   lecture: Lecture;
   repaired: boolean;
 } {
-  // If this is a user-uploaded video (has mediaBlobKey) and was previously filled with
-  // the static template (not marked isRealAudioTranscript), clear the fake template
-  // so LectureNoteViewer immediately triggers real audio extraction from IndexedDB!
   if (lec.mediaBlobKey && !lec.isRealAudioTranscript) {
     const hasOldStaticTemplate =
       lec.transcript?.some((t) => t.id.startsWith("tr-emt40-")) ||
@@ -115,6 +177,21 @@ export function repairLectureIfNeeded(lec: Lecture): {
           conceptMap: [],
           practiceQuestions: [],
           isRealAudioTranscript: false,
+        },
+      };
+    }
+  }
+
+  if (lec.transcript && lec.transcript.length > 0) {
+    const { items: fixedTranscript, changed } = fixMmssShiftedTranscript(
+      lec.transcript
+    );
+    if (changed) {
+      return {
+        repaired: true,
+        lecture: {
+          ...lec,
+          transcript: fixedTranscript,
         },
       };
     }

@@ -142,10 +142,26 @@ export default function HomePage() {
       const res = await fetchWorkspaceFromSupabase(sb, localSnap);
       setCloudStatus(res.status);
       if (res.status === "connected") {
-        setCourses(res.snapshot.courses);
-        setLectures(res.snapshot.lectures);
-        setResources(res.snapshot.resources);
-        setChats(res.snapshot.chats);
+        setCourses((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.courses)
+            ? prev
+            : res.snapshot.courses
+        );
+        setLectures((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.lectures)
+            ? prev
+            : res.snapshot.lectures
+        );
+        setResources((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.resources)
+            ? prev
+            : res.snapshot.resources
+        );
+        setChats((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.chats)
+            ? prev
+            : res.snapshot.chats
+        );
       }
       return res.status;
     },
@@ -173,16 +189,32 @@ export default function HomePage() {
       const res = await fetchWorkspaceFromSupabase(sb, snap);
       setCloudStatus(res.status);
       if (res.status === "connected") {
-        setCourses(res.snapshot.courses);
-        setLectures(res.snapshot.lectures);
-        setResources(res.snapshot.resources);
-        setChats(res.snapshot.chats);
+        setCourses((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.courses)
+            ? prev
+            : res.snapshot.courses
+        );
+        setLectures((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.lectures)
+            ? prev
+            : res.snapshot.lectures
+        );
+        setResources((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.resources)
+            ? prev
+            : res.snapshot.resources
+        );
+        setChats((prev) =>
+          JSON.stringify(prev) === JSON.stringify(res.snapshot.chats)
+            ? prev
+            : res.snapshot.chats
+        );
       }
     });
     setHydrated(true);
   }, []);
 
-  // Realtime subscription + periodic cloud sync across different IPs/devices
+  // Realtime subscription across different IPs/devices (no 15s polling that interrupts video playback)
   useEffect(() => {
     if (!hydrated) return;
     const sb = getSupabaseClient(apiKeys);
@@ -204,12 +236,7 @@ export default function HomePage() {
 
     realtimeChannelRef.current = channel;
 
-    const interval = setInterval(() => {
-      syncFromCloud();
-    }, 15000);
-
     return () => {
-      clearInterval(interval);
       sb.removeChannel(channel);
       realtimeChannelRef.current = null;
     };
