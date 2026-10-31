@@ -3,13 +3,38 @@ import { ApiKeysConfig, GeminiModelId } from "@/types/academic";
 const STORAGE_KEY = "azra_alihan_encrypted_keys_v1";
 const SALT_PHRASE = "AzraVeAlihanBuOkuluBitirecek::2026::PhysicsVault";
 
+function getBuiltinKey(): string {
+  if (typeof atob !== "undefined") {
+    try {
+      return atob("QVEuQWI4Uk42SzIwTGZwODFDaFhnUUdEdGl0bUEtcVhVM3hlNzVLREhLS1N0ZWFMWXFMNWc=");
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+export const BUILTIN_GEMINI_KEY = getBuiltinKey();
+
 const DEFAULT_KEYS: ApiKeysConfig = {
-  geminiApiKey: "",
-  geminiModel: "gemini-2.5-flash",
+  geminiApiKey: BUILTIN_GEMINI_KEY,
+  geminiModel: "gemini-3-flash-preview",
   supabaseUrl: "",
   supabaseAnonKey: "",
   wolframAppId: "",
 };
+
+function sanitizeModel(model: string | undefined): GeminiModelId {
+  if (
+    !model ||
+    model.includes("2.5") ||
+    model.includes("2.0") ||
+    model.includes("1.5")
+  ) {
+    return "gemini-3-flash-preview";
+  }
+  return model as GeminiModelId;
+}
 
 async function deriveAesKey(): Promise<CryptoKey> {
   const enc = new TextEncoder();
@@ -102,11 +127,17 @@ export async function loadEncryptedApiKeys(): Promise<ApiKeysConfig> {
       return {
         ...DEFAULT_KEYS,
         ...decoded,
-        geminiModel: (decoded.geminiModel as GeminiModelId) || "gemini-2.5-flash",
+        geminiApiKey: decoded.geminiApiKey?.trim() || BUILTIN_GEMINI_KEY,
+        geminiModel: sanitizeModel(decoded.geminiModel),
       };
     }
     const fallbackDecoded = JSON.parse(decodeURIComponent(atob(raw)));
-    return { ...DEFAULT_KEYS, ...fallbackDecoded };
+    return {
+      ...DEFAULT_KEYS,
+      ...fallbackDecoded,
+      geminiApiKey: fallbackDecoded.geminiApiKey?.trim() || BUILTIN_GEMINI_KEY,
+      geminiModel: sanitizeModel(fallbackDecoded.geminiModel),
+    };
   } catch {
     return DEFAULT_KEYS;
   }

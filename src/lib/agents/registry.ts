@@ -186,11 +186,27 @@ const geminiAcademicAdapter: AgentToolAdapter = {
 2) Vize/Final seviyesinde 2 adet çözümlü çalışma sorusu hazırla.
 Yanıtı doğrudan temiz Markdown + LaTeX olarak ver.`;
 
-      const resp = await ai.models.generateContent({
-        model: ctx.apiKeys.geminiModel || "gemini-2.5-flash",
-        contents: prompt,
-      });
-      const md = resp.text?.trim();
+      let md = "";
+      const modelsToTry = [
+        ctx.apiKeys.geminiModel || "gemini-3-flash-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+      ];
+      for (const m of modelsToTry) {
+        try {
+          const resp = await ai.models.generateContent({
+            model: m,
+            contents: prompt,
+          });
+          if (resp.text?.trim()) {
+            md = resp.text.trim();
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
       if (!md) return [];
 
       return [

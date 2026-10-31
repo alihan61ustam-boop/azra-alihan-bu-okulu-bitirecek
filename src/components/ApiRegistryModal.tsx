@@ -77,11 +77,17 @@ export function ApiRegistryModal({
   const handleValidateAndSaveGemini = async () => {
     setValidating(true);
     setValidationResult(null);
-    onSaveApiKeys(draftKeys);
     const res = await validateGeminiApiKey(
       draftKeys.geminiApiKey,
       draftKeys.geminiModel
     );
+    if (res.activeModel && res.activeModel !== draftKeys.geminiModel) {
+      const updated = { ...draftKeys, geminiModel: res.activeModel };
+      setDraftKeys(updated);
+      onSaveApiKeys(updated);
+    } else {
+      onSaveApiKeys(draftKeys);
+    }
     setValidationResult(res);
     setValidating(false);
   };
@@ -255,14 +261,17 @@ export function ApiRegistryModal({
                   }
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-xs text-white focus:border-amber-500/60 focus:outline-none"
                 >
-                  <option value="gemini-2.5-flash">
-                    gemini-2.5-flash (Önerilen • Hızlı Multimodal Video/Ses + LaTeX)
+                  <option value="gemini-3-flash-preview">
+                    gemini-3-flash-preview (Önerilen • Yeni Nesil Hızlı Multimodal Video/Ses + LaTeX)
                   </option>
-                  <option value="gemini-2.0-flash">
-                    gemini-2.0-flash (Düşük Gecikmeli Multimodal Analiz)
+                  <option value="gemini-3.5-flash">
+                    gemini-3.5-flash (Gelişmiş Çok Kanallı Analiz)
                   </option>
-                  <option value="gemini-2.5-pro">
-                    gemini-2.5-pro (İleri Teorik Fizik &amp; Ağır Türetmeler)
+                  <option value="gemini-3.1-flash-lite">
+                    gemini-3.1-flash-lite (Hızlı &amp; Düşük Gecikmeli)
+                  </option>
+                  <option value="gemini-3.1-pro-preview">
+                    gemini-3.1-pro-preview (İleri Düzey Teorik Fizik &amp; Türetmeler)
                   </option>
                 </select>
               </div>

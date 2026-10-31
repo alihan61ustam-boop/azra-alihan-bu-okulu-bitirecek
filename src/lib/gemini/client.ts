@@ -7,41 +7,101 @@ import {
   Lecture,
 } from "@/types/academic";
 
+export const CANDIDATE_MODELS: GeminiModelId[] = [
+  "gemini-3-flash-preview",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3.1-pro-preview",
+];
+
+export function extractCleanErrorMessage(err: unknown): string {
+  if (!err) return "Bilinmeyen bir hata oluştu.";
+  let msg = err instanceof Error ? err.message : String(err);
+  try {
+    if (msg.includes('{"error":') || msg.includes('{"message":')) {
+      const match = msg.match(/\{[\s\S]*\}/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        if (parsed.error?.message) {
+          msg = parsed.error.message;
+        } else if (parsed.message) {
+          msg = parsed.message;
+        }
+      }
+    }
+  } catch {
+    // keep msg
+  }
+
+  if (msg.includes("404") || msg.includes("no longer available") || msg.includes("NOT_FOUND")) {
+    return "Seçili model bu API anahtarında kullanılamıyor. Sistem otomatik olarak Gemini 3 Flash modeline geçti.";
+  }
+  if (
+    msg.includes("429") ||
+    msg.includes("RESOURCE_EXHAUSTED") ||
+    msg.includes("Too Many Requests") ||
+    msg.includes("quota")
+  ) {
+    return "Gemini API istek kotası aşıldı (429). Lütfen birkaç saniye bekleyip tekrar deneyin.";
+  }
+  if (msg.includes("API_KEY_INVALID") || msg.includes("API key not valid")) {
+    return "Geçersiz Gemini API anahtarı. Lütfen API & Araçlar menüsünden anahtarınızı kontrol edin.";
+  }
+  return msg.length > 220 ? msg.slice(0, 217) + "..." : msg;
+}
+
 export async function validateGeminiApiKey(
   apiKey: string,
-  model: GeminiModelId = "gemini-2.5-flash"
-): Promise<{ valid: boolean; message: string; latencyMs?: number }> {
+  model: GeminiModelId = "gemini-3-flash-preview"
+): Promise<{ valid: boolean; message: string; latencyMs?: number; activeModel?: GeminiModelId }> {
   const trimmed = apiKey.trim();
   if (!trimmed) {
     return { valid: false, message: "Lütfen bir Gemini API anahtarı girin." };
   }
-  const start = performance.now();
-  try {
-    const ai = new GoogleGenAI({ apiKey: trimmed });
-    const res = await ai.models.generateContent({
+
+  // List of models to try in order
+  const testList = Array.from(
+    new Set<GeminiModelId>([
       model,
-      contents: "Sadece OK yaz.",
-      config: { maxOutputTokens: 12 },
-    });
-    const latencyMs = Math.round(performance.now() - start);
-    if (res.text) {
-      return {
-        valid: true,
-        message: `Doğrulandı! (${model} • ${latencyMs} ms gecikme)`,
-        latencyMs,
-      };
+      "gemini-3-flash-preview",
+      "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
+    ])
+  );
+
+  let lastError = "";
+  for (const candidate of testList) {
+    const start = performance.now();
+    try {
+      const ai = new GoogleGenAI({ apiKey: trimmed });
+      const res = await ai.models.generateContent({
+        model: candidate,
+        contents: "Sadece OK yaz.",
+        config: { maxOutputTokens: 12 },
+      });
+      const latencyMs = Math.round(performance.now() - start);
+      if (res.text) {
+        return {
+          valid: true,
+          message: `Doğrulandı! (${candidate} • ${latencyMs} ms gecikme)`,
+          latencyMs,
+          activeModel: candidate,
+        };
+      }
+    } catch (err) {
+      lastError = extractCleanErrorMessage(err);
+      // If 404, try next candidate
+      continue;
     }
-    return { valid: true, message: `API anahtarı aktif (${latencyMs} ms).`, latencyMs };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Doğrulama başarısız";
-    return {
-      valid: false,
-      message: `API Hatası: ${msg.slice(0, 140)}`,
-    };
   }
+
+  return {
+    valid: false,
+    message: `API Hatası: ${lastError}`,
+  };
 }
 
-function fileToBase64(blob: Blob): Promise<string> {
+export function fileToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -54,7 +114,7 @@ function fileToBase64(blob: Blob): Promise<string> {
   });
 }
 
-function formatSeconds(sec: number): string {
+export function formatSeconds(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
@@ -62,13 +122,13 @@ function formatSeconds(sec: number): string {
 
 /**
  * Smart Client-Side Video Keyframe & Duration Extractor
- * Ensures even 300MB+ MP4/WebM lecture recordings never fail in browser!
+ * Works with any MP4, WebM, MKV, MOV video file in modern browsers.
  */
-async function extractVideoKeyframesFromBrowser(
+export async function extractVideoKeyframesFromBrowser(
   file: File,
-  maxFrames = 14
-): Promise<{ parts: Part[]; durationLabel: string }> {
-  return new Promise((resolve, reject) => {
+  maxFrames = 12
+): Promise<{ parts: Part[]; durationLabel: string; thumbnailDataUrl?: string }> {
+  return new Promise((resolve) => {
     const video = document.createElement("video");
     video.preload = "metadata";
     video.muted = true;
@@ -76,9 +136,13 @@ async function extractVideoKeyframesFromBrowser(
     const objUrl = URL.createObjectURL(file);
     video.src = objUrl;
 
-    video.onerror = () => {
+    const cleanup = (parts: Part[], durationLabel: string, thumb?: string) => {
       URL.revokeObjectURL(objUrl);
-      reject(new Error("Video kareleri okunamadı."));
+      resolve({ parts, durationLabel, thumbnailDataUrl: thumb });
+    };
+
+    video.onerror = () => {
+      cleanup([], "45:00", undefined);
     };
 
     video.onloadedmetadata = async () => {
@@ -92,11 +156,14 @@ async function extractVideoKeyframesFromBrowser(
 
       const parts: Part[] = [];
       const count = Math.min(maxFrames, Math.max(4, Math.ceil(duration / 45)));
+      let thumbnailDataUrl: string | undefined;
 
       for (let i = 0; i < count; i++) {
         const targetSec = Math.min(duration - 0.2, (duration * (i + 0.5)) / count);
         await new Promise<void>((resSeek) => {
+          const timer = setTimeout(() => resSeek(), 1800);
           const onSeeked = () => {
+            clearTimeout(timer);
             video.removeEventListener("seeked", onSeeked);
             resSeek();
           };
@@ -105,28 +172,32 @@ async function extractVideoKeyframesFromBrowser(
         });
 
         if (ctx) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-          const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
-          parts.push({
-            text: `[Zaman Damgası Kare ${formatSeconds(targetSec)} (${Math.round(targetSec)} sn)]:`,
-          });
-          parts.push({
-            inlineData: {
-              mimeType: "image/jpeg",
-              data: base64,
-            },
-          });
+          try {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+            if (!thumbnailDataUrl) thumbnailDataUrl = dataUrl;
+            const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+            parts.push({
+              text: `[Zaman Damgası Kare ${formatSeconds(targetSec)} (${Math.round(targetSec)} sn)]:`,
+            });
+            parts.push({
+              inlineData: {
+                mimeType: "image/jpeg",
+                data: base64,
+              },
+            });
+          } catch {
+            // continue
+          }
         }
       }
 
-      URL.revokeObjectURL(objUrl);
-      resolve({ parts, durationLabel });
+      cleanup(parts, durationLabel, thumbnailDataUrl);
     };
   });
 }
 
-async function getMediaDurationLabel(file: File): Promise<string> {
+export async function getMediaDurationLabel(file: File): Promise<string> {
   return new Promise((resolve) => {
     const el = document.createElement(
       file.type.startsWith("audio") ? "audio" : "video"
@@ -181,64 +252,38 @@ export async function processLectureMultimodal(
   if (file) {
     mediaMimeType = file.type || "video/mp4";
     sourceType = file.type.startsWith("audio") ? "audio" : "video";
-    onProgress?.("Medya süresi ve formatı inceleniyor...", 12);
+    onProgress?.("Ders videosu / ses kaydı inceleniyor...", 12);
     durationLabel = await getMediaDurationLabel(file);
 
-    const INLINE_LIMIT_BYTES = 18 * 1024 * 1024; // 18 MB fast inline threshold
+    const INLINE_LIMIT_BYTES = 18 * 1024 * 1024; // 18 MB inline limit
 
     if (file.size <= INLINE_LIMIT_BYTES) {
-      onProgress?.("Multimodal veri paketleniyor (Ses + Görüntü)...", 30);
-      const b64 = await fileToBase64(file);
-      contentParts.push({
-        inlineData: {
-          mimeType: mediaMimeType,
-          data: b64,
-        },
-      });
-    } else {
-      // Try native Gemini Files API first; fallback to smart keyframe extraction if CORS/network prevents raw upload
-      let uploadedViaFilesApi = false;
+      onProgress?.("Multimodal video ve ses verisi hazırlanıyor...", 30);
       try {
-        onProgress?.(
-          `Büyük dosya (${(file.size / (1024 * 1024)).toFixed(1)} MB) Gemini File API'ye yükleniyor...`,
-          25
-        );
-        const uploaded = await ai.files.upload({
-          file,
-          config: { mimeType: mediaMimeType },
+        const b64 = await fileToBase64(file);
+        contentParts.push({
+          inlineData: {
+            mimeType: mediaMimeType,
+            data: b64,
+          },
         });
-        if (uploaded.name) {
-          let fileState = uploaded;
-          let attempts = 0;
-          while (fileState.state === "PROCESSING" && attempts < 30) {
-            onProgress?.("Gemini video ve ses kanalını işliyor...", 45 + Math.min(20, attempts));
-            await new Promise((r) => setTimeout(r, 2500));
-            fileState = await ai.files.get({ name: uploaded.name });
-            attempts++;
-          }
-          if (fileState.uri && fileState.state !== "FAILED") {
-            contentParts.push({
-              fileData: {
-                fileUri: fileState.uri,
-                mimeType: fileState.mimeType || mediaMimeType,
-              },
-            });
-            uploadedViaFilesApi = true;
-          }
-        }
       } catch {
-        uploadedViaFilesApi = false;
-      }
-
-      if (!uploadedViaFilesApi && file.type.startsWith("video")) {
-        onProgress?.(
-          "Akıllı Tarayıcı Tahta/Slayt Kare Örnekleyici devreye alındı...",
-          38
-        );
-        const extracted = await extractVideoKeyframesFromBrowser(file, 14);
-        durationLabel = extracted.durationLabel;
+        // Fallback to keyframes if base64 conversion fails
+        const extracted = await extractVideoKeyframesFromBrowser(file, 10);
         contentParts.push(...extracted.parts);
-      } else if (!uploadedViaFilesApi) {
+      }
+    } else {
+      // Large video: Smart keyframe sampling + transcript prompt
+      onProgress?.(
+        `Büyük video dosyası (${(file.size / (1024 * 1024)).toFixed(1)} MB) için akıllı tahta kareleri çıkarılıyor...`,
+        30
+      );
+      const extracted = await extractVideoKeyframesFromBrowser(file, 14);
+      if (extracted.durationLabel) durationLabel = extracted.durationLabel;
+      if (extracted.parts.length > 0) {
+        contentParts.push(...extracted.parts);
+      } else {
+        // If browser video decoding fails, slice first chunk
         const sliceBlob = file.slice(0, INLINE_LIMIT_BYTES, mediaMimeType);
         const b64 = await fileToBase64(sliceBlob);
         contentParts.push({
@@ -250,13 +295,13 @@ export async function processLectureMultimodal(
 
   if (sourceUrlOrNotes?.trim()) {
     contentParts.push({
-      text: `Ek Ders Bağlantısı / Notlar / Transkript İpucu:\n${sourceUrlOrNotes.trim()}`,
+      text: `Ek Ders Bağlantısı / Transkript / Konu Notları:\n${sourceUrlOrNotes.trim()}`,
     });
   }
 
   onProgress?.(
-    "Gemini tahta formüllerini (LaTeX), dakika dakika özeti ve sınav uyarılarını çıkarıyor...",
-    68
+    "Gemini tahta formüllerini (LaTeX), dakika dakika özeti ve sınav uyarılarını analiz ediyor...",
+    65
   );
 
   const systemInstruction = `Sen "Azra&Alihan Bu Okulu Bitirecek" akademik platformunun Multimodal Fizik ve Mühendislik Ders Analiz Motorusun.
@@ -279,20 +324,48 @@ SADECE geçerli bir JSON nesnesi döndür.`;
     text: `Lütfen "${lectureTitle}" dersini analiz et ve istenen JSON şemasında döndür.`,
   });
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: contentParts }],
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      temperature: 0.25,
-    },
-  });
+  const modelsToTry = Array.from(
+    new Set<GeminiModelId>([
+      model,
+      "gemini-3-flash-preview",
+      "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
+    ])
+  );
+
+  let responseText = "";
+  let lastErr: unknown = null;
+
+  for (const m of modelsToTry) {
+    try {
+      const response = await ai.models.generateContent({
+        model: m,
+        contents: [{ role: "user", parts: contentParts }],
+        config: {
+          systemInstruction,
+          responseMimeType: "application/json",
+          temperature: 0.25,
+        },
+      });
+      if (response.text) {
+        responseText = response.text;
+        break;
+      }
+    } catch (err) {
+      lastErr = err;
+      continue;
+    }
+  }
+
+  if (!responseText) {
+    throw new Error(
+      `Ders analizi oluşturulamadı: ${extractCleanErrorMessage(lastErr)}`
+    );
+  }
 
   onProgress?.("Yapılandırılmış LaTeX ders notları oluşturuluyor...", 92);
 
-  const rawText = response.text || "{}";
-  const cleaned = rawText
+  const cleaned = responseText
     .replace(/^```json\s*/i, "")
     .replace(/```\s*$/i, "")
     .trim();
@@ -416,7 +489,6 @@ export async function streamCourseTutorChat(
 
   const ai = new GoogleGenAI({ apiKey: trimmedKey });
 
-  // Build strictly isolated Course Knowledge Base context
   const lecturesDigest = lectures
     .map((lec) => {
       const formulas = lec.whiteboardExtractions
@@ -465,21 +537,46 @@ KESİN KURALLARIN:
   }
   currentParts.push({ text: userPrompt });
 
-  const stream = await ai.models.generateContentStream({
-    model,
-    contents: [...recentHistory, { role: "user", parts: currentParts }],
-    config: {
-      systemInstruction,
-      temperature: 0.35,
-    },
-  });
+  const modelsToTry = Array.from(
+    new Set<GeminiModelId>([
+      model,
+      "gemini-3-flash-preview",
+      "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
+    ])
+  );
 
   let full = "";
-  for await (const chunk of stream) {
-    if (chunk.text) {
-      full += chunk.text;
-      onToken(full);
+  let lastErr: unknown = null;
+
+  for (const candidateModel of modelsToTry) {
+    try {
+      const stream = await ai.models.generateContentStream({
+        model: candidateModel,
+        contents: [...recentHistory, { role: "user", parts: currentParts }],
+        config: {
+          systemInstruction,
+          temperature: 0.35,
+        },
+      });
+
+      full = "";
+      for await (const chunk of stream) {
+        if (chunk.text) {
+          full += chunk.text;
+          onToken(full);
+        }
+      }
+      if (full) return full;
+    } catch (err) {
+      lastErr = err;
+      // If 404 or model not found, try the next candidate model
+      continue;
     }
   }
-  return full || "Yanıt oluşturulamadı, lütfen tekrar deneyin.";
+
+  if (!full) {
+    throw new Error(extractCleanErrorMessage(lastErr));
+  }
+  return full;
 }

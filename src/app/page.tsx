@@ -35,6 +35,7 @@ import {
   syncLectureToSupabase,
 } from "@/lib/hybridStore";
 import {
+  BUILTIN_GEMINI_KEY,
   loadEncryptedApiKeys,
   saveEncryptedApiKeys,
 } from "@/lib/cryptoStorage";
@@ -87,8 +88,8 @@ export default function HomePage() {
 
   // API & Agency Tool Configs
   const [apiKeys, setApiKeys] = useState<ApiKeysConfig>({
-    geminiApiKey: "",
-    geminiModel: "gemini-2.5-flash",
+    geminiApiKey: BUILTIN_GEMINI_KEY,
+    geminiModel: "gemini-3-flash-preview",
     supabaseUrl: "",
     supabaseAnonKey: "",
     wolframAppId: "",
@@ -205,6 +206,21 @@ export default function HomePage() {
     setLectures(next);
     const nextForCourse = next.filter((l) => l.courseId === activeCourse.id);
     setActiveLectureId(nextForCourse[0]?.id || "");
+  };
+
+  const handleAttachMediaToLecture = async (lectureId: string, file: File) => {
+    setLectures((prev) =>
+      prev.map((l) =>
+        l.id === lectureId
+          ? {
+              ...l,
+              mediaBlobKey: `blob-${lectureId}`,
+              mediaMimeType: file.type || "video/mp4",
+              sourceType: file.type.startsWith("audio") ? "audio" : "video",
+            }
+          : l
+      )
+    );
   };
 
   const handleSaveApiKeys = async (cfg: ApiKeysConfig) => {
@@ -487,6 +503,7 @@ export default function HomePage() {
                 onOpenUploadModal={() => setUploadModalOpen(true)}
                 onDeleteLecture={handleDeleteLecture}
                 onAskTutor={handleAskTutorFromNotes}
+                onAttachMedia={handleAttachMediaToLecture}
               />
             )}
           </div>

@@ -19,7 +19,10 @@ import {
   Lecture,
 } from "@/types/academic";
 import { MathMarkdown } from "@/components/MathMarkdown";
-import { streamCourseTutorChat } from "@/lib/gemini/client";
+import {
+  extractCleanErrorMessage,
+  streamCourseTutorChat,
+} from "@/lib/gemini/client";
 
 const QUICK_PROMPTS = [
   "Bu dersteki tüm sınav uyarılarını özetle",
@@ -138,11 +141,7 @@ export function CourseChatPanel({
       };
       onUpdateMessages([...updatedHistory, assistantMsg]);
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Yanıt alınırken bir bağlantı hatası oluştu."
-      );
+      setError(extractCleanErrorMessage(err));
     } finally {
       setIsStreaming(false);
       setStreamingContent("");

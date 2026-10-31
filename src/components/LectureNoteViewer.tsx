@@ -20,10 +20,11 @@ import {
   ChevronUp,
   Download,
   ArrowRight,
+  Video,
 } from "lucide-react";
 import { Course, Lecture } from "@/types/academic";
 import { LatexFormula, MathMarkdown } from "@/components/MathMarkdown";
-import { loadMediaObjectUrl } from "@/lib/mediaDb";
+import { loadMediaObjectUrl, saveMediaBlob } from "@/lib/mediaDb";
 
 type NoteFilter =
   | "all"
@@ -40,6 +41,7 @@ export function LectureNoteViewer({
   onOpenUploadModal,
   onDeleteLecture,
   onAskTutor,
+  onAttachMedia,
 }: {
   course: Course;
   lectures: Lecture[];
@@ -48,6 +50,7 @@ export function LectureNoteViewer({
   onOpenUploadModal: () => void;
   onDeleteLecture: (id: string) => void;
   onAskTutor: (promptText: string) => void;
+  onAttachMedia?: (lectureId: string, file: File) => void;
 }) {
   const activeLecture =
     lectures.find((l) => l.id === activeLectureId) || lectures[0];
@@ -55,6 +58,7 @@ export function LectureNoteViewer({
   const [filter, setFilter] = useState<NoteFilter>("all");
   const [mediaObjectUrl, setMediaObjectUrl] = useState<string | null>(null);
   const [activeTimestamp, setActiveTimestamp] = useState<string | null>(null);
+  const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [openTranscripts, setOpenTranscripts] = useState<Record<string, boolean>>(
     {}
@@ -65,6 +69,7 @@ export function LectureNoteViewer({
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
+  const directVideoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let revokedUrl: string | null = null;
@@ -229,13 +234,77 @@ export function LectureNoteViewer({
         </div>
       </div>
 
+      {/* Hidden Input for Direct Video/Audio Attachment */}
+      <input
+        ref={directVideoInputRef}
+        type="file"
+        accept="video/mp4,video/webm,video/x-matroska,video/quicktime,video/avi,video/*,.mp4,.mkv,.webm,.mov,.avi,.m4v,.ts,audio/*,.mp3,.wav,.m4a"
+        className="hidden"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (!file || !activeLecture) return;
+          const key = `blob-${activeLecture.id}`;
+          await saveMediaBlob(key, file);
+          const objUrl = URL.createObjectURL(file);
+          setMediaObjectUrl(objUrl);
+          onAttachMedia?.(activeLecture.id, file);
+        }}
+      />
+
       {/* Media Player OR Interactive Timestamp Bar */}
       <div
         ref={playerContainerRef}
         className="overflow-hidden rounded-2xl border border-zinc-800/90 bg-[#050507]"
       >
         {mediaObjectUrl ? (
-          <div className="p-3 space-y-2">
+          <div className="p-3 sm:p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/20 text-amber-400">
+                  <Play className="h-3 w-3 fill-amber-400" />
+                </span>
+                <span className="text-xs font-bold text-white">
+                  Ders Kaydı Oynatıcı
+                </span>
+                {activeTimestamp && (
+                  <span className="rounded bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] text-amber-300">
+                    Aktif: {activeTimestamp}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+                  {[0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                    <button
+                      key={rate}
+                      type="button"
+                      onClick={() => {
+                        setPlaybackRate(rate);
+                        if (videoRef.current) videoRef.current.playbackRate = rate;
+                        if (audioRef.current) audioRef.current.playbackRate = rate;
+                      }}
+                      className={`px-1.5 py-0.5 font-mono text-[10px] font-semibold rounded transition cursor-pointer ${
+                        playbackRate === rate
+                          ? "bg-amber-400 text-zinc-950"
+                          : "text-zinc-400 hover:text-white"
+                      }`}
+                    >
+                      {rate}x
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => directVideoInputRef.current?.click()}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300 hover:text-white cursor-pointer"
+                >
+                  Farklı Video Seç
+                </button>
+              </div>
+            </div>
+
             {activeLecture.sourceType === "audio" ||
             activeLecture.mediaMimeType?.startsWith("audio") ? (
               <audio
@@ -249,61 +318,112 @@ export function LectureNoteViewer({
                 ref={videoRef}
                 controls
                 src={mediaObjectUrl}
-                className="max-h-80 w-full rounded-xl bg-black object-contain"
+                className="max-h-96 w-full rounded-xl bg-black object-contain border border-zinc-800/80"
               />
             )}
-            <div className="flex items-center justify-between px-1 text-[11px] text-zinc-400">
-              <span>
-                Aşağıdaki herhangi bir{" "}
-                <code className="font-mono text-amber-300">[DK:SN]</code>{" "}
-                etiketine tıklayarak kayıtta o saniyeye atlayabilirsin.
+
+            {/* Quick Timestamp Jump Bar under active video */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-zinc-800/70">
+              <span className="text-[11px] text-zinc-400">
+                Zaman damgasına tıkla, doğrudan videoda o noktaya atla:
               </span>
-              {activeTimestamp && (
-                <span className="font-mono text-amber-300">
-                  Aktif Konum: {activeTimestamp}
-                </span>
-              )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {activeLecture.timeline.map((seg) => (
+                  <button
+                    key={seg.id}
+                    type="button"
+                    onClick={() => handleJumpToTimestamp(seg.timestamp, seg.seconds)}
+                    className={`rounded-md border px-2 py-0.5 font-mono text-[11px] transition cursor-pointer ${
+                      activeTimestamp === seg.timestamp
+                        ? "border-amber-400 bg-amber-500/20 text-amber-200"
+                        : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    }`}
+                  >
+                    {seg.timestamp}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         ) : (
-          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-amber-400">
-                <Play className="h-3.5 w-3.5" />
+          <div className="p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-amber-400">
+                  <Play className="h-3.5 w-3.5" />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-zinc-200">
+                    {activeLecture.title}
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    {activeLecture.recordedDate} • Süre:{" "}
+                    <span className="font-mono text-zinc-300">
+                      {activeLecture.durationLabel}
+                    </span>{" "}
+                    {activeTimestamp && (
+                      <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-amber-300">
+                        Seçili: {activeTimestamp}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
-              <div>
-                <div className="text-xs font-semibold text-zinc-200">
-                  {activeLecture.title}
-                </div>
-                <div className="text-[11px] text-zinc-500">
-                  {activeLecture.recordedDate} • Süre:{" "}
-                  <span className="font-mono text-zinc-300">
-                    {activeLecture.durationLabel}
-                  </span>{" "}
-                  {activeTimestamp && (
-                    <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-amber-300">
-                      Seçili Zaman Damgası: {activeTimestamp}
-                    </span>
-                  )}
-                </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {activeLecture.timeline.map((seg) => (
+                  <button
+                    key={seg.id}
+                    type="button"
+                    onClick={() => handleJumpToTimestamp(seg.timestamp, seg.seconds)}
+                    className={`rounded-md border px-2 py-1 font-mono text-[11px] transition cursor-pointer ${
+                      activeTimestamp === seg.timestamp
+                        ? "border-amber-400 bg-amber-500/20 text-amber-200"
+                        : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    }`}
+                  >
+                    {seg.timestamp}
+                  </button>
+                ))}
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5">
-              {activeLecture.timeline.map((seg) => (
-                <button
-                  key={seg.id}
-                  type="button"
-                  onClick={() => handleJumpToTimestamp(seg.timestamp, seg.seconds)}
-                  className={`rounded-md border px-2 py-1 font-mono text-[11px] transition cursor-pointer ${
-                    activeTimestamp === seg.timestamp
-                      ? "border-amber-400 bg-amber-500/20 text-amber-200"
-                      : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                  }`}
-                >
-                  {seg.timestamp}
-                </button>
-              ))}
+            {/* Direct Video File Attach Card */}
+            <div
+              onClick={() => directVideoInputRef.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={async (e) => {
+                e.preventDefault();
+                const file = e.dataTransfer.files?.[0];
+                if (!file || !activeLecture) return;
+                const key = `blob-${activeLecture.id}`;
+                await saveMediaBlob(key, file);
+                const objUrl = URL.createObjectURL(file);
+                setMediaObjectUrl(objUrl);
+                onAttachMedia?.(activeLecture.id, file);
+              }}
+              className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-3.5 hover:border-amber-500/40 hover:bg-zinc-900/60 transition cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-400">
+                  <Video className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-zinc-200">
+                    Bu derse ait video veya ses kaydın var mı?
+                  </div>
+                  <div className="text-[11px] text-zinc-400">
+                    Dosyayı buraya sürükle veya seç (.MP4, .MKV, .WEBM, .MOV, .MP3) — anında zaman damgalarıyla izle.
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="shrink-0 rounded-lg bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-950 hover:bg-zinc-200"
+              >
+                Video Yükle
+              </button>
             </div>
           </div>
         )}
